@@ -1,0 +1,38 @@
+[project]
+name = "rag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # 核心 LLM 框架
+    "langchain",
+    "langchain-core",
+    "langchain-community",
+    "langchain-openai",
+    "langchain-mcp-adapters",
+    "langgraph",
+    # OpenAI & API
+    "openai",
+    "langfuse",
+    # MCP 相关
+    "fastmcp",
+    "mcp == 1.14.1",
+    "a2a-sdk",
+    # 向量数据库 & 嵌入
+    "pymilvus[milvus-lite,model]",
+    "sentence-transformers",
+    # 基础工具
+    "numpy",
+    "tiktoken",
+    "lxml",
+    # 评估指标
+    "ragas",
+    "rouge",
+    "bert-score",
+    "jieba>=0.42.1",
+    "nltk>=3.9.2",
+]
+
+[[tool.uv.index]]
+url = "http://mirrors.aliyun.com/pypi/simple"
