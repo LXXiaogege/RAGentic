@@ -140,7 +140,7 @@ class MineruLoader(BaseLoader):
         class_name = self.__class__.__name__
         logger.info(f"[{class_name}] Mineru解析pdf文件: {file_path}")
         try:
-            md_file, content_json_file = self.preprocess_pdf_with_mineru_cli(file_path)
+            md_file, content_json_file = self.preprocess_pdf_with_mineru_cli(file_path, "output")
             loader = UnstructuredMarkdownLoader(md_file)
             documents = loader.load()
             logger.info(f"[{class_name}] Mineru文件加载完成: {file_path}, 共 {len(documents)} 个文档块")

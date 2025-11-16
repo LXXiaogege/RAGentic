@@ -17,6 +17,9 @@ os.environ["LANGFUSE_HOST"] = config.langfuse_config.get("host")  # eu cloud
 os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = "testing"  # 区分 生产、测试等环境
 os.environ["LANGFUSE_TRACING_ENABLED"] = "false"  # 启用或禁用 Langfuse 客户端
 
+os.environ["OPENAI_API_KEY"] = config.llm_api_key
+os.environ["OPENAI_API_BASE"] = config.llm_base_url
+
 langfuse_client = get_client()
 pipeline = QAPipeline(config)
 # pipeline.build_knowledge_base(config.knowledge_dir)

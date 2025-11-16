@@ -22,7 +22,7 @@ import asyncio
 import concurrent.futures
 from src.config.logger_config import setup_logger
 from src.models.embedding import TextEmbedding
-from src.cores.milvus_db import MilvusDB
+from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.models.llm import LLMWrapper
 from src.config.config import QAPipelineConfig
 from src.cores.query_transformer import QueryTransformer
@@ -129,7 +129,7 @@ class LangGraphQAPipeline:
         self.message_builder = MessageBuilder(self.config)
 
         # 向量数据库
-        self.db_manager = MilvusDB(self.config, self.embeddings, self.text_splitter)
+        self.db_connection_manager = MilvusConnectionManager(self.config, self.embeddings, self.text_splitter)
 
         # LLM包装器
         self.llm_caller = LLMWrapper(self.config)
@@ -139,7 +139,7 @@ class LangGraphQAPipeline:
             self.llm_caller, self.config,
             message_builder=MessageBuilder(self.config),
             embeddings=self.embeddings,
-            db_manager=self.db_manager
+            db_connection_manager=self.db_connection_manager
         )
 
         # MCP客户端
@@ -336,7 +336,7 @@ class LangGraphQAPipeline:
             ):
                 results = self.query_transformer.hyde_search(query, state.k)
             else:
-                results = self.db_manager.search(
+                results = self.db_connection_manager.search(
                     query=query,
                     k=state.k,
                     use_sparse=state.use_sparse,

@@ -10,7 +10,7 @@ from src.models.llm import LLMWrapper
 from src.config.config import QAPipelineConfig
 from src.cores.message_builder import MessageBuilder
 from src.models.embedding import TextEmbedding
-from src.cores.milvus_db import MilvusDB
+from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.config.logger_config import setup_logger
 import numpy as np
 
@@ -19,14 +19,14 @@ logger = setup_logger(__name__)
 
 class QueryTransformer:
     def __init__(self, llm: LLMWrapper, config: QAPipelineConfig, message_builder: MessageBuilder,
-                 embeddings: TextEmbedding, db_manager: MilvusDB):
+                 embeddings: TextEmbedding, db_connection_manager: MilvusConnectionManager):
         self.logger = logger
         self.logger.info("初始化查询转换器...")
         self.config = config
         self.llm = llm
         self.message_builder = message_builder
         self.embeddings = embeddings
-        self.db_manager = db_manager
+        self.db_connection_manager = db_connection_manager
         self.logger.info("查询转换器初始化完成")
 
     def get_templates(self, mode: str) -> str:
@@ -158,7 +158,7 @@ class QueryTransformer:
             self.logger.debug("已生成 HyDE 向量")
 
             # 执行搜索
-            docs = self.db_manager.search(
+            docs = self.db_connection_manager.search(
                 query=vector,
                 k=k,
                 use_sparse=False,

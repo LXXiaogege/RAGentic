@@ -15,7 +15,7 @@ from src.config.logger_config import setup_logger
 from langfuse import observe
 
 logger = setup_logger(__name__)
-pass
+
 
 class TextEmbedding:
     def __init__(self, api_key: str, base_url: str, model: str = "text2vec",

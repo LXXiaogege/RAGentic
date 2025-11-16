@@ -18,7 +18,7 @@ import concurrent.futures
 
 from src.config.logger_config import setup_logger
 from src.models.embedding import TextEmbedding
-from src.cores.milvus_db import MilvusDB
+from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.models.llm import LLMWrapper
 from src.config.config import QAPipelineConfig
 from src.cores.query_transformer import QueryTransformer
@@ -123,9 +123,9 @@ class QA_Agent:
         self.message_builder = MessageBuilder(self.config)
 
         # 向量数据库
-        self.db_manager = MilvusDB(
+        self.db_connection_manager = MilvusConnectionManager(
             self.config, self.embeddings,
-            self.text_splitter, logger=logger
+            self.text_splitter
         )
 
         # LLM包装器
@@ -136,7 +136,7 @@ class QA_Agent:
             self.llm_caller, self.config,
             message_builder=MessageBuilder(self.config),
             embeddings=self.embeddings,
-            db_manager=self.db_manager
+            db_connection_manager=self.db_connection_manager
         )
 
         # MCP客户端

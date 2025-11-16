@@ -6,7 +6,7 @@
 @Desc    : 支持配置化、批量问答、自动评估、接口调用的知识库问答模块封装
 """
 from src.models.embedding import TextEmbedding
-from src.cores.milvus_db import MilvusDB
+from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.agent.memory import ConversationMemory
 from src.models.llm import LLMWrapper
 from src.evaluate.evaluate import QAEvaluator
@@ -40,7 +40,7 @@ class QAPipeline:
         self.logger.info("初始化工具管理器...")
         self.logger.info("初始化查询转换器...")
         self.query_transformer = QueryTransformer(self.llm_caller, self.config, self.message_builder, self.embeddings,
-                                                  self.db_manager)
+                                                  self.db_connection_manager)
         # 初始化 Langfuse 客户端
         self.logger.info("初始化 Langfuse ...")
         self.langfuse_client = langfuse_client
@@ -68,7 +68,8 @@ class QAPipeline:
         self.message_builder = MessageBuilder(self.config)
 
         self.logger.info("初始化向量数据库管理器...")
-        self.db_manager = MilvusDB(self.config, self.embeddings, self.text_splitter)
+        # 使用统一的 MilvusDB 入口类
+        self.db_connection_manager = MilvusConnectionManager(self.config, self.embeddings, self.text_splitter)
 
         self.logger.info("初始化对话记忆...")
         self.memory = ConversationMemory(
@@ -80,7 +81,7 @@ class QAPipeline:
     @observe(name="QAPipline.build_knowledge_base")
     def build_knowledge_base(self, data_dir: str):
         self.logger.info(f"开始构建知识库，数据目录: {data_dir}")
-        self.db_manager.add_documents_from_dir(data_dir)
+        self.db_connection_manager.add_documents_from_dir(data_dir)
         self.logger.info("知识库构建完成")
 
     @observe(name="QAPipeline._build_messages")
@@ -130,7 +131,8 @@ class QAPipeline:
                 self.logger.info("使用 HyDE 方法进行检索")
                 results = self.query_transformer.hyde_search(query, k)
             else:
-                results = self.db_manager.search(query=query, k=k, use_sparse=use_sparse, use_reranker=use_reranker)
+                results = self.db_connection_manager.search(query=query, k=k, use_sparse=use_sparse,
+                                                            use_reranker=use_reranker)
             if not results or not results[0]:
                 kb_context = "未检索到相关知识。"
                 self.logger.warning("知识库检索未返回结果")
