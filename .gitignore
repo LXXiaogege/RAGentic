@@ -148,6 +148,5 @@ config/*.yml
 *.yml
 
 *.jpg
-config.py
 data/
 *.mmd
