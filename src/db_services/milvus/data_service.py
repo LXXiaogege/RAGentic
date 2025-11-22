@@ -37,14 +37,6 @@ def truncate_by_bytes(text: str, max_bytes: int = 1024, encoding: str = 'utf-8')
     return truncated.decode(encoding, errors='ignore')
 
 
-class SearchSettings(BaseModel):
-    """
-    定义了可以在运行时（从前端）覆盖的搜索设置
-    """
-    k: Optional[int] = None
-    use_sparse: Optional[bool] = None
-    use_reranker: Optional[bool] = None
-    use_contextualize_embedding: Optional[bool] = None
 
 
 class MilvusDataService:

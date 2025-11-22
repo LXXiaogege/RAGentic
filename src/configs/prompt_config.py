@@ -16,10 +16,7 @@ class PromptConfig(BaseModel):
         description="知识库系统 prompt 名称"
     )
     kb_system_prompt: str = Field(
-        """{prefix}你是一个资深知识问答助手，回答时需参考给定的上下文资料。
-请用中文作答，若无法从资料中获取信息，请如实说明。
-最终回答使用 JSON 格式，如：{{"answer": "回答内容"}}。
-{context_hint}""",
+        """{prefix}你是一个资深知识问答助手，回答时需参考给定的上下文资料。请用中文作答，若无法从资料中获取信息，请如实说明。{context_hint}""",
         description="知识库系统 prompt 模板"
     )
 

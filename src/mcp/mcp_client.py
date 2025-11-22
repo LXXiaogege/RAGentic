@@ -79,15 +79,6 @@ class MCPClient:
         except (ConnectionError, TimeoutError) as e:
             logger.error(f"Failed to connect to server: {str(e)}")
             raise
-        finally:
-            # 确保 exit_stack 被关闭，资源释放
-            if hasattr(self, "exit_stack"):
-                try:
-                    await self.exit_stack.aclose()
-                except (asyncio.CancelledError, ConnectionResetError) as e:
-                    logger.warning(f"Cleanup error (logged for diagnostics): {e}")
-                except Exception as e:
-                    logger.exception(f"An unexpected error occurred during exit_stack cleanup.{e}")
 
     def _convert_mcp_tools_to_openai_format(self):
         """Convert MCP tools to OpenAI tool format"""
@@ -229,3 +220,17 @@ async def mcp_main(client, query):
     finally:
         await client.cleanup()
         logger.info("MCP main completed")
+
+
+if __name__ == "__main__":
+    from src.configs.config import AppConfig
+    from src.models.llm import LLMWrapper
+
+    config = AppConfig()
+    llm = LLMWrapper(config.llm)
+    client = MCPClient(llm)
+    query = '洛杉矶今天天气怎么样？'
+    # query = '今天百度第一条新闻是什么?'
+    tool_result = asyncio.run(mcp_main(client, query))
+    print(tool_result)
+    pass

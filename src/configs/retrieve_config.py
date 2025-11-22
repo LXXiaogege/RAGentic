@@ -18,7 +18,7 @@ class SplitterConfig(BaseModel):
 
 # 查询改写配置
 class RewriteConfig(BaseModel):
-    enable: bool = True
+    pass
 
 
 # Milvus 数据库配置
@@ -56,7 +56,7 @@ class SearchConfig(BaseModel):
     use_contextualize_embedding: bool = False
     kb_path: str = Field("../data/knowledge_db/psychology")
 
-    max_context_length: int = Field(3000, ge=1)
+    max_context_length: int = Field(300000, ge=1)
 
     retriever_type: str = Field("dense", description="dense / sparse / hybrid")
 
@@ -83,7 +83,7 @@ class SearchConfig(BaseModel):
 # Prompt 构建配置
 class MessageBuilderConfig(BaseModel):
     message_builder_model: str = "gpt-3.5-turbo"
-    message_max_tokens: int = Field(3500, ge=1)
+    message_max_tokens: int = Field(3500000, ge=1)
 
     message_system_prompt_template: str = "{prefix}{context_hint}"
 

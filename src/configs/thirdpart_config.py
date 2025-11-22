@@ -11,3 +11,4 @@ class LangfuseConfig(BaseModel):
     host: str
     public_key: str
     secret_key: str
+    LANGFUSE_TRACING_ENVIRONMENT: str = "testing"

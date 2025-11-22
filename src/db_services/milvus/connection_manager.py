@@ -6,14 +6,13 @@
 @IDE ：PyCharm
 """
 from pymilvus import MilvusClient
-from src.configs.retrieve_config import MilvusConfig
+from src.configs.retrieve_config import MilvusConfig, SearchConfig
 from src.db_services.milvus.database_manager import MilvusDBManager
 from src.db_services.milvus.collection_manager import MilvusCollectionManager
 from src.db_services.milvus.data_service import MilvusDataService
 from src.configs.logger_config import setup_logger
 from typing import Union, List, Optional, Dict, Any
 import numpy as np
-from src.db_services.milvus.data_service import SearchSettings
 
 logger = setup_logger(__name__)
 
@@ -23,30 +22,31 @@ class MilvusConnectionManager:
     统一的 Milvus 数据库入口类
     """
 
-    def __init__(self, embeddings, text_splitter, config: MilvusConfig):
+    def __init__(self, embeddings, text_splitter, milvus_config: MilvusConfig, search_config: SearchConfig):
         """
         初始化 Milvus 数据库
 
         Args:
-            config: 配置对象
+            milvus_config: 配置对象
             embeddings: 嵌入模型
             text_splitter: 文本分割器
         """
         self.logger = logger
-        self.config = config
+        self.milvus_config = milvus_config
+        self.search_config = search_config
         self.embeddings = embeddings
         self.text_splitter = text_splitter
 
         # 1. 创建 Milvus 客户端
         self.logger.info("初始化 Milvus 客户端...")
-        if self.config.milvus_mode == "local":
-            self.client = MilvusClient(self.config.vector_db_uri)
+        if self.milvus_config.milvus_mode == "local":
+            self.client = MilvusClient(self.milvus_config.vector_db_uri)
         else:
             self.client = MilvusClient(
-                uri=self.config.vector_db_uri,
-                user=self.config.db_user,
-                password=self.config.db_password,
-                db_name=self.config.db_name
+                uri=self.milvus_config.vector_db_uri,
+                user=self.milvus_config.db_user,
+                password=self.milvus_config.db_password,
+                db_name=self.milvus_config.db_name
             )
 
         # 2. 初始化数据库管理器
@@ -54,12 +54,12 @@ class MilvusConnectionManager:
         self.db_manager = MilvusDBManager(self.client)
 
         # 如果配置了数据库名称，切换数据库
-        if self.config.db_name and self.config.milvus_mode != "local":
+        if self.milvus_config.db_name and self.milvus_config.milvus_mode != "local":
             try:
                 databases = self.db_manager.list_databases()
-                if self.config.db_name not in (databases or []):
-                    self.db_manager.create_database(self.config.db_name)
-                self.db_manager.use_database(self.config.db_name)
+                if self.milvus_config.db_name not in (databases or []):
+                    self.db_manager.create_database(self.milvus_config.db_name)
+                self.db_manager.use_database(self.milvus_config.db_name)
             except Exception as e:
                 self.logger.warning(f"数据库操作警告: {e}")
 
@@ -73,7 +73,7 @@ class MilvusConnectionManager:
             collection_manager=self.collection_manager,
             embeddings=self.embeddings,
             text_splitter=self.text_splitter,
-            config=self.config,
+            config=self.milvus_config,
         )
 
         # 保持向后兼容的属性
@@ -132,15 +132,15 @@ class MilvusConnectionManager:
 
     def build_collection(self):
         """构建集合（如果不存在则创建）"""
-        if not self.has_collection(self.config.collection_name):
-            self.logger.info(f"集合 {self.config.collection_name} 不存在，开始创建...")
+        if not self.has_collection(self.milvus_config.collection_name):
+            self.logger.info(f"集合 {self.milvus_config.collection_name} 不存在，开始创建...")
             schema = self._create_default_schema()
-            self.collection_manager.create_collection(self.config.collection_name, schema)
-            self.collection_manager.load(self.config.collection_name)
-            self.logger.info(f"集合 {self.config.collection_name} 创建并加载完成")
+            self.collection_manager.create_collection(self.milvus_config.collection_name, schema)
+            self.collection_manager.load(self.milvus_config.collection_name)
+            self.logger.info(f"集合 {self.milvus_config.collection_name} 创建并加载完成")
         else:
-            self.logger.info(f"集合 {self.config.collection_name} 已存在，跳过创建")
-            self.load_collection(self.config.collection_name)
+            self.logger.info(f"集合 {self.milvus_config.collection_name} 已存在，跳过创建")
+            self.load_collection(self.milvus_config.collection_name)
 
     def _create_default_schema(self) -> dict:
         """创建默认的集合 schema"""
@@ -157,22 +157,22 @@ class MilvusConnectionManager:
                 {
                     "name": "dense_vec",
                     "dtype": "FLOAT_VECTOR",
-                    "dim": self.config.vector_dimension
+                    "dim": self.milvus_config.vector_dimension
                 },
                 {
                     "name": "bm25_vec",
                     "dtype": "SPARSE_FLOAT_VECTOR",
-                    "drop_ratio_build": self.config.bm25_drop_ratio
+                    "drop_ratio_build": self.milvus_config.bm25_drop_ratio
                 },
                 {
                     "name": "text",
                     "dtype": "VARCHAR",
-                    "max_length": self.config.max_text_length
+                    "max_length": self.milvus_config.max_text_length
                 },
                 {
                     "name": "metadata",
                     "dtype": "VARCHAR",
-                    "max_length": self.config.max_metadata_length
+                    "max_length": self.milvus_config.max_metadata_length
                 }
             ]
         }
@@ -209,28 +209,9 @@ class MilvusConnectionManager:
         # 添加文档
         self.data_service.add_documents_from_dir(data_dir)
 
-    def search(self, query: Union[str, List[float], np.array], k: Optional[int] = None,
-               use_sparse: Optional[bool] = None, use_reranker: Optional[bool] = None,
-               use_contextualize_embedding: Optional[bool] = None) -> List[Dict[str, Any]]:
+    def search(self, query: Union[str, List[float], np.array], search_config: SearchConfig) -> List[Dict[str, Any]]:
         """
         搜索向量
-
-        Args:
-            query: 查询文本或向量
-            k: 返回结果数量
-            use_sparse: 是否使用稀疏搜索
-            use_reranker: 是否使用重排序
-            use_contextualize_embedding: 是否使用上下文嵌入
-
-        Returns:
-            搜索结果列表
         """
-
-        # 如果传入了参数，创建 SearchSettings 对象
-        settings = SearchSettings(
-            k=k,
-            use_sparse=use_sparse,
-            use_reranker=use_reranker,
-            use_contextualize_embedding=use_contextualize_embedding
-        )
-        return self.data_service.search(query, settings=settings)
+        self.search_config = search_config if search_config else self.search_config
+        return self.data_service.search(query, self.search_config)

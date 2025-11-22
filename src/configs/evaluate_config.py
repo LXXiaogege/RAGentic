@@ -20,8 +20,7 @@ class EvaluationConfig(BaseModel):
     """
 
     # --- 基础评估方式 ---
-    default_eval_method: str = "rouge"  # 可选: rouge | bert | gpt | ragas
-    default_eval_limit: int = 3  # 每条 QA 最大参考答案数量限制
+    eval_method: str = "rouge"  # 可选: rouge | bert | gpt | ragas
     bert_score_lang: str = "zh"  # BERTScore 使用的语言
 
     # --- GPT Judge 配置 ---

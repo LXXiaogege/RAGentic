@@ -15,16 +15,19 @@ from src.configs.evaluate_config import EvaluationConfig
 from src.configs.logger_config import setup_logger
 from langfuse import observe
 
+from src.configs.retrieve_config import SearchConfig
+
 logger = setup_logger(__name__)
 
 
 class QAEvaluator:
-    def __init__(self, qa_pipeline):
+    def __init__(self, qa_pipeline, eval_config: EvaluationConfig, search_config: SearchConfig):
         self.logger = logger
         self.logger.info("初始化问答评估器...")
+        self.eval_config = eval_config
+        self.search_config = search_config
         self.qa_pipeline = qa_pipeline  # QAPipeline 实例
         self.llm = qa_pipeline.llm_caller
-        self.config = EvaluationConfig()
         self.logger.info("问答评估器初始化完成")
 
     def _extract_answer(self, raw_answer: str) -> str:
@@ -44,31 +47,27 @@ class QAEvaluator:
         return answer
 
     @observe(name="QAEvaluator.evaluate", as_type="evaluator")
-    def evaluate(self, qa_pairs: List[Dict[str, str]], method: Optional[str] = None, k: Optional[int] = None) -> List[
+    def evaluate(self, qa_pairs: List[Dict[str, str]]) -> List[
         Dict]:
         """
         评估问答对
         
         Args:
             qa_pairs: 问答对列表
-            method: 评估方法
-            k: 检索数量
         """
-        method = method or self.config.default_eval_method
-        k = k or self.config.default_eval_limit
-        self.logger.info(f"开始评估，使用 {method} 方法，检索数量 k={k}")
+        self.logger.info(f"开始评估，使用 {self.eval_config.eval_method} 方法，检索数量 :{self.search_config.top_k}")
         self.logger.info(f"待评估问答对数量: {len(qa_pairs)}")
 
         try:
-            if method == "rouge":
-                results = self.evaluate_with_rouge(qa_pairs, k)
-            elif method == "bert":
-                results = self.evaluate_with_bert_score(qa_pairs, k)
-            elif method == "gpt":
-                results = self.evaluate_with_gpt_judge(qa_pairs, k)
+            if self.eval_config.eval_method == "rouge":
+                results = self.evaluate_with_rouge(qa_pairs)
+            elif self.eval_config.eval_method == "bert":
+                results = self.evaluate_with_bert_score(qa_pairs)
+            elif self.eval_config.eval_method == "gpt":
+                results = self.evaluate_with_gpt_judge(qa_pairs)
             else:
-                self.logger.error(f"未知评估方法: {method}")
-                raise ValueError(f"未知评估方法: {method}")
+                self.logger.error(f"未知评估方法: {self.eval_config.eval_method}")
+                raise ValueError(f"未知评估方法: {self.eval_config.eval_method}")
 
             self.logger.info(f"评估完成，共处理 {len(results)} 个问答对")
             return results
@@ -78,7 +77,7 @@ class QAEvaluator:
             raise
 
     @observe(name="QAEvaluator.evaluate_with_rouge", as_type="evaluator")
-    def evaluate_with_rouge(self, qa_pairs: List[Dict[str, str]], k: int = 3) -> List[Dict]:
+    def evaluate_with_rouge(self, qa_pairs: List[Dict[str, str]]) -> List[Dict]:
         """使用 ROUGE 指标评估"""
         self.logger.info("开始 ROUGE 评估...")
         rouge = Rouge()
@@ -87,7 +86,7 @@ class QAEvaluator:
         for i, pair in enumerate(qa_pairs, 1):
             self.logger.info(f"处理第 {i}/{len(qa_pairs)} 个问答对")
             try:
-                result = self.qa_pipeline.ask(pair["question"], k=k)
+                result = self.qa_pipeline.ask(pair["question"])
                 model_answer = self._extract_answer(result["answer"])
                 scores = rouge.get_scores(model_answer, pair["answer"])[0]
                 self.logger.debug(f"ROUGE 分数: {scores}")
@@ -106,7 +105,7 @@ class QAEvaluator:
         return results
 
     @observe(name="QAEvaluator.evaluate_with_bert_score", as_type="evaluator")
-    def evaluate_with_bert_score(self, qa_pairs: List[Dict[str, str]], k: int = 3) -> List[Dict]:
+    def evaluate_with_bert_score(self, qa_pairs: List[Dict[str, str]]) -> List[Dict]:
         """使用 BERTScore 评估"""
         self.logger.info("开始 BERTScore 评估...")
         candidates = []
@@ -117,7 +116,7 @@ class QAEvaluator:
         for i, pair in enumerate(qa_pairs, 1):
             self.logger.info(f"处理第 {i}/{len(qa_pairs)} 个问答对")
             try:
-                qa_result = self.qa_pipeline.ask(pair["question"], k=k)
+                qa_result = self.qa_pipeline.ask(pair["question"])
                 model_answer = self._extract_answer(qa_result["answer"])
                 reference = pair["answer"]
                 candidates.append(model_answer)
@@ -138,8 +137,7 @@ class QAEvaluator:
             P, R, F1 = bert_score_func(
                 candidates,
                 references,
-                lang=self.config.bert_score_lang,
-                verbose=False
+                lang=self.eval_config.bert_score_lang,
             )
             self.logger.debug(f"BERTScore 计算完成，样本数: {len(P)}")
         except Exception as e:
@@ -162,7 +160,7 @@ class QAEvaluator:
         return raw_results
 
     @observe(name="QAEvaluator.evaluate_with_gpt_judge", as_type="evaluator")
-    def evaluate_with_gpt_judge(self, qa_pairs: List[Dict[str, str]], k: int = 3) -> List[Dict]:
+    def evaluate_with_gpt_judge(self, qa_pairs: List[Dict[str, str]]) -> List[Dict]:
         """使用 GPT 评估"""
         self.logger.info("开始 GPT 评估...")
         results = []
@@ -171,13 +169,13 @@ class QAEvaluator:
             self.logger.info(f"处理第 {i}/{len(qa_pairs)} 个问答对")
             try:
                 # 获取模型回答
-                qa_result = self.qa_pipeline.ask(pair["question"], k=k)
+                qa_result = self.qa_pipeline.ask(pair["question"])
                 model_answer = self._extract_answer(qa_result["answer"])
                 reference = pair["answer"]
                 self.logger.debug(f"答案长度: {len(model_answer)}, 参考长度: {len(reference)}")
 
                 # 构建评估提示
-                prompt = self.config.gpt_judge_prompt_template.format(
+                prompt = self.eval_config.gpt_judge_prompt_template.format(
                     question=pair["question"],
                     model_answer=model_answer,
                     reference=reference
@@ -188,7 +186,7 @@ class QAEvaluator:
                 try:
                     judge = self.llm.chat(
                         messages=[
-                            {"role": "system", "content": self.config.gpt_judge_system_prompt},
+                            {"role": "system", "content": self.eval_config.gpt_judge_system_prompt},
                             {"role": "user", "content": prompt}
                         ],
                         stream=False,

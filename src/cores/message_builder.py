@@ -125,8 +125,8 @@ class MessageBuilder:
 
         added_turns = 0
         for item in history:
-            question = item.get("question", "").strip()
-            answer = item.get("answer", "").strip()
+            question = item.get("user", "").strip()
+            answer = item.get("assistant", "").strip()
             q_tokens = self.num_tokens(question)
             a_tokens = self.num_tokens(answer)
             turn_tokens = q_tokens + a_tokens
