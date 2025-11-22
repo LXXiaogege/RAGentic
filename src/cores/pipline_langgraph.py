@@ -20,11 +20,11 @@ from langchain_core.runnables import RunnableConfig
 
 import asyncio
 import concurrent.futures
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
+from src.configs.config import AppConfig
 from src.models.embedding import TextEmbedding
 from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.models.llm import LLMWrapper
-from src.config.config import QAPipelineConfig
 from src.cores.query_transformer import QueryTransformer
 from src.mcp.mcp_client import MCPClient, mcp_main
 from src.cores.message_builder import MessageBuilder
@@ -48,26 +48,13 @@ class QAState(BaseModel):
     tool_context: Optional[str] = None
     final_context: Optional[str] = None
 
-    # 配置参数
-    use_knowledge_base: bool = False
-    use_tools: bool = False
-    use_memory: bool = True
-    k: int = 4
-    use_sparse: bool = False
-    use_reranker: bool = False
-
-    # 流程控制
-    next_step: Optional[str] = None
     error: Optional[str] = None
-
-    # 评估相关
-    evaluation_mode: bool = False
-    ground_truth: Optional[str] = None
 
 
 def build_prompt_messages(
         state: QAState,
         system_prompt: str,
+        use_memory=False,
         memory_limit: int = 10
 ) -> List:
     """构建用于 LLM 调用的消息序列"""
@@ -77,7 +64,7 @@ def build_prompt_messages(
     # 添加系统提示
 
     # 添加历史消息（如有）
-    if state.use_memory and state.messages:
+    if use_memory and state.messages:
         history_messages = [
             msg for msg in state.messages
             if not isinstance(msg, SystemMessage)
@@ -104,7 +91,7 @@ def build_prompt_messages(
 class LangGraphQAPipeline:
     """基于LangGraph的QA Pipeline"""
 
-    def __init__(self, config: QAPipelineConfig):
+    def __init__(self, config: AppConfig):
         self.logger = logger
         self.config = config
         self._init_components()
@@ -115,47 +102,38 @@ class LangGraphQAPipeline:
         self.logger.info("初始化QA Pipeline组件...")
 
         # 文本嵌入
-        self.embeddings = TextEmbedding(
-            api_key=self.config.embedding_api_key,
-            base_url=self.config.embedding_base_url,
-            model=self.config.embedding_model,
-            cache_path=self.config.embedding_cache_path
-        )
+        self.embeddings = TextEmbedding(self.config.embedding)
 
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.config.chunk_size,
-            chunk_overlap=self.config.chunk_overlap
+            chunk_size=self.config.splitter.chunk_size,
+            chunk_overlap=self.config.splitter.chunk_overlap
         )
-        self.message_builder = MessageBuilder(self.config)
+        self.message_builder = MessageBuilder(self.config.message_builder)
 
         # 向量数据库
-        self.db_connection_manager = MilvusConnectionManager(self.config, self.embeddings, self.text_splitter)
+        self.db_connection_manager = MilvusConnectionManager(self.embeddings, self.text_splitter, self.config.milvus)
 
         # LLM包装器
-        self.llm_caller = LLMWrapper(self.config)
+        self.llm_caller = LLMWrapper(self.config.llm)
 
         # 查询转换器
         self.query_transformer = QueryTransformer(
-            self.llm_caller, self.config,
-            message_builder=MessageBuilder(self.config),
-            embeddings=self.embeddings,
-            db_connection_manager=self.db_connection_manager
-        )
+            self.llm_caller, self.message_builder, self.embeddings, self.db_connection_manager, self.config.rewrite)
 
         # MCP客户端
-        self.mcp_client = MCPClient(self.config)
+        self.mcp_client = MCPClient(self.llm_caller)
 
         # 检查点保存器
         self.checkpointer = MemorySaver()
 
         # 初始化 Langfuse 客户端
         self.langfuse_client = None
-        if hasattr(self.config, 'langfuse_config') and self.config.langfuse_config['secret_key']:
+        if self.config.langfuse.secret_key:
             try:
                 self.langfuse_client = Langfuse(
-                    secret_key=self.config.langfuse_config['secret_key'],
-                    public_key=self.config.langfuse_config['public_key'],
-                    host=self.config.langfuse_config['host'],
+                    secret_key=self.config.langfuse.secret_key,
+                    public_key=self.config.langfuse.public_key,
+                    host=self.config.langfuse.host
                 )
                 self.langfuse_handler = CallbackHandler()
                 self.logger.info("Langfuse 客户端初始化完成")
@@ -274,13 +252,12 @@ class LangGraphQAPipeline:
             self.logger.info(f"解析查询: {state.original_query}")
             # 定义默认配置
             defaults = dict(
-                k=self.config.default_top_k,
-                use_sparse=self.config.use_sparse,
-                use_reranker=self.config.use_reranker,
-                use_knowledge_base=True,
-                use_tools=False,
-                use_memory=True,
-                evaluation_mode=False,
+                k=self.config.retrieve.top_k,
+                use_sparse=self.config.retrieve.use_sparse,
+                use_reranker=self.config.retrieve.use_reranker,
+                use_knowledge_base=self.config.retrieve.use_kb,
+                use_tools=self.config.retrieve.use_tool,
+                use_memory=self.config.retrieve.use_memory,
                 error=None,
             )
             merged = {**defaults, **(state.model_dump() if isinstance(state, BaseModel) else state)}
@@ -296,10 +273,9 @@ class LangGraphQAPipeline:
         try:
             self.logger.info(f"转换查询: {state.original_query}")
 
-            if self.config.rewrite_config.get("enable"):
-                mode = self.config.rewrite_config["mode"]
+            if self.config.retrieve.use_rewrite:
                 transformed_query = self.query_transformer.transform_query(
-                    state.original_query, mode
+                    state.original_query, self.config.retrieve.rewrite_mode
                 )
                 state.transformed_query = transformed_query
                 self.logger.info(f"查询转换完成: {transformed_query}")
@@ -322,7 +298,7 @@ class LangGraphQAPipeline:
     def _retrieve_knowledge(self, state: QAState) -> QAState:
         """知识库检索"""
         try:
-            if not state.use_knowledge_base:
+            if not self.config.retrieve.use_kb:
                 state.kb_context = ""
                 return state
 
@@ -330,17 +306,14 @@ class LangGraphQAPipeline:
             self.logger.info(f"开始知识库检索: {query}")
 
             # 选择检索方法
-            if (
-                    self.config.rewrite_config.get("enable")
-                    and self.config.rewrite_config.get("mode") == "hyde"
-            ):
-                results = self.query_transformer.hyde_search(query, state.k)
+            if self.config.retrieve.use_rewrite and self.config.retrieve.rewrite_mode == "hyde":
+                results = self.query_transformer.hyde_search(query, self.config.retrieve.top_k)
             else:
                 results = self.db_connection_manager.search(
                     query=query,
-                    k=state.k,
-                    use_sparse=state.use_sparse,
-                    use_reranker=state.use_reranker,
+                    k=self.config.retrieve.top_k,
+                    use_sparse=self.config.retrieve.use_sparse,
+                    use_reranker=self.config.retrieve.use_reranker,
                 )
 
             # 处理检索结果
@@ -368,7 +341,7 @@ class LangGraphQAPipeline:
     def _call_tools(self, state: QAState) -> QAState:
         """调用外部工具"""
         try:
-            if not state.use_tools:
+            if not self.config.retrieve.use_tool:
                 state.tool_context = ""
                 return state
 
@@ -431,16 +404,17 @@ class LangGraphQAPipeline:
 
             # 根据是否启用知识库选择系统提示
             system_prompt = (
-                self.config.kb_system_prompt
-                if state.use_knowledge_base
-                else self.config.system_prompt
+                self.config.prompt.kb_system_prompt
+                if self.config.retrieve.use_kb
+                else self.config.prompt.system_prompt
             )
 
             # 构建消息
             messages = build_prompt_messages(
                 state,
                 system_prompt=system_prompt,
-                memory_limit=10
+                use_memory=self.config.retrieve.use_memory,
+                memory_limit=self.config.retrieve.memory_window_size
             )
 
             # 调用 LLM 生成答案
@@ -465,7 +439,7 @@ class LangGraphQAPipeline:
     def _update_memory(self, state: QAState) -> QAState:
         """更新记忆"""
         try:
-            if state.use_memory and state.messages:
+            if self.config.retrieve.use_memory and state.messages:
                 # 确保消息历史不超过最大长度
                 max_history = 10  # 可根据需要调整
                 state.messages = state.messages[-max_history:]
@@ -497,7 +471,7 @@ class LangGraphQAPipeline:
         if state.error:
             return "error"
 
-        if self.config.rewrite_config.get("enable"):
+        if self.config.retrieve.use_rewrite:
             return "transform"
         else:
             return "skip_transform"
@@ -507,7 +481,7 @@ class LangGraphQAPipeline:
         if state.error:
             return "error"
 
-        if self.config.knowledge_base_config.get("enable"):
+        if self.config.retrieve.use_kb:
             return "do_retrieve"
         else:
             return "skip_retrieve"
@@ -517,7 +491,7 @@ class LangGraphQAPipeline:
         if state.error:
             return "error"
 
-        if state.use_tools:
+        if self.config.retrieve.use_tool:
             return "call_tools"
         else:
             return "skip_tools"
@@ -527,7 +501,7 @@ class LangGraphQAPipeline:
         if state.error:
             return "error"
 
-        if state.use_memory:
+        if self.config.retrieve.use_memory:
             return "update_memory"
         else:
             return "finish"
@@ -572,14 +546,7 @@ class LangGraphQAPipeline:
         # 初始化状态
         initial_state_dict = {
             "original_query": query,
-            "messages": existing_messages,  # 使用现有消息历史
-            "rewrite_config": kwargs.get("rewrite_config", self.config.rewrite_config),
-            "use_knowledge_base": kwargs.get("use_knowledge_base", self.config.use_knowledge_base),
-            "use_tools": kwargs.get("use_tools", self.config.use_tools),
-            "use_memory": kwargs.get("use_memory", self.config.use_memory),
-            "k": kwargs.get("k", self.config.default_top_k),
-            "use_sparse": kwargs.get("use_sparse", self.config.use_sparse),
-            "use_reranker": kwargs.get("use_reranker", self.config.use_reranker)
+            "messages": existing_messages,
         }
         initial_state_object = QAState(**initial_state_dict)
 
@@ -628,13 +595,6 @@ class LangGraphQAPipeline:
         initial_state_dict = {
             "original_query": query,
             "messages": [],
-            "rewrite_config": kwargs.get("rewrite_config", self.config.rewrite_config),
-            "use_knowledge_base": kwargs.get("use_knowledge_base", self.config.use_knowledge_base),
-            "use_tools": kwargs.get("use_tools", self.config.use_tools),
-            "use_memory": kwargs.get("use_memory", self.config.use_memory),
-            "k": kwargs.get("k", self.config.default_top_k),
-            "use_sparse": kwargs.get("use_sparse", self.config.use_sparse),
-            "use_reranker": kwargs.get("use_reranker", self.config.use_reranker)
         }
         initial_state_object = QAState(**initial_state_dict)
 

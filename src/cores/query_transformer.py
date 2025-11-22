@@ -7,19 +7,20 @@
 """
 from typing import List, Dict, Optional
 from src.models.llm import LLMWrapper
-from src.config.config import QAPipelineConfig
+from src.configs.retrieve_config import RewriteConfig
+
 from src.cores.message_builder import MessageBuilder
 from src.models.embedding import TextEmbedding
 from src.db_services.milvus.connection_manager import MilvusConnectionManager
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 import numpy as np
 
 logger = setup_logger(__name__)
 
 
 class QueryTransformer:
-    def __init__(self, llm: LLMWrapper, config: QAPipelineConfig, message_builder: MessageBuilder,
-                 embeddings: TextEmbedding, db_connection_manager: MilvusConnectionManager):
+    def __init__(self, llm: LLMWrapper, message_builder: MessageBuilder, embeddings: TextEmbedding,
+                 db_connection_manager: MilvusConnectionManager, config: RewriteConfig):
         self.logger = logger
         self.logger.info("初始化查询转换器...")
         self.config = config

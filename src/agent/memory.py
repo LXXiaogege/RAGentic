@@ -7,18 +7,19 @@
 """
 from collections import deque
 from typing import List, Dict
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
+from src.configs.retrieve_config import SearchConfig
 
 # 配置日志记录器
 logger = setup_logger(__name__)
 
 
 class ConversationMemory:
-    def __init__(self, window_size: int = 5):
+    def __init__(self, config: SearchConfig):
         self.logger = logger
-        self.window_size = window_size
-        self.memory = deque(maxlen=window_size)
-        self.logger.info(f"初始化对话记忆，窗口大小: {window_size}")
+        self.config = config
+        self.memory = deque(maxlen=self.config.memory_window_size)
+        self.logger.info(f"初始化对话记忆，窗口大小: {self.config.memory_window_size}")
 
     def add(self, question: str, answer: str):
         """添加一轮对话"""
@@ -66,5 +67,5 @@ class ConversationMemory:
         import json
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            self.memory = deque(data, maxlen=self.window_size)
+            self.memory = deque(data, maxlen=self.config.memory_window_size)
         self.logger.info(f"从文件加载对话历史: {path}，加载了 {len(data)} 轮对话")

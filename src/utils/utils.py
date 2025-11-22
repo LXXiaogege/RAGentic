@@ -7,7 +7,7 @@
 """
 import hashlib
 from urllib.parse import urlparse
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 
 # 配置日志记录器
 logger = setup_logger(__name__)

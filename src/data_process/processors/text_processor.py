@@ -8,7 +8,7 @@
 import re
 from langchain_core.documents import Document
 from typing import List
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 
 logger = setup_logger(__name__)
 

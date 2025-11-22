@@ -6,12 +6,12 @@
 @IDE ：PyCharm
 """
 
-from src.config.config import QAPipelineConfig
+from src.configs.config import AppConfig
 from src.cores.pipline_langgraph import LangGraphQAPipeline
 
 """使用示例"""
 # 假设有配置对象
-config = QAPipelineConfig()
+config = AppConfig()
 
 # 初始化流水线
 pipeline = LangGraphQAPipeline(config)

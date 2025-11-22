@@ -9,7 +9,7 @@ import requests
 from lxml import html
 from typing import Dict, List
 from urllib.parse import urlparse
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 from langfuse import observe
 
 logger = setup_logger(__name__)

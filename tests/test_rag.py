@@ -5,23 +5,24 @@
 @File ：test_rag.py
 @IDE ：PyCharm
 """
-from src.config.config import QAPipelineConfig
+from src.configs.config import AppConfig
 from langfuse import get_client
 import os
 from src.cores.pipeline import QAPipeline
 
-config = QAPipelineConfig()
-os.environ["LANGFUSE_SECRET_KEY"] = config.langfuse_config.get("secret_key")
-os.environ["LANGFUSE_PUBLIC_KEY"] = config.langfuse_config.get("public_key")
-os.environ["LANGFUSE_HOST"] = config.langfuse_config.get("host")  # eu cloud
+config = AppConfig()
+os.environ["LANGFUSE_SECRET_KEY"] = config.langfuse.secret_key
+os.environ["LANGFUSE_PUBLIC_KEY"] = config.langfuse.public_key
+os.environ["LANGFUSE_HOST"] = config.langfuse.host
 os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = "testing"  # 区分 生产、测试等环境
 os.environ["LANGFUSE_TRACING_ENABLED"] = "false"  # 启用或禁用 Langfuse 客户端
 
-os.environ["OPENAI_API_KEY"] = config.llm_api_key
-os.environ["OPENAI_API_BASE"] = config.llm_base_url
+os.environ["OPENAI_API_KEY"] = config.llm.api_key
+os.environ["OPENAI_API_BASE"] = config.llm.base_url
 
 langfuse_client = get_client()
 pipeline = QAPipeline(config)
-# pipeline.build_knowledge_base(config.knowledge_dir)
 
-print(pipeline.ask("请问大模型是什么，简单概述下", use_knowledge_base=False, is_tool=False, no_think=True))
+# pipeline.build_knowledge_base("/Users/lvxin/PycharmProjects/RAGentic/data/knowledge_db/pumpkin_book")
+
+print(pipeline.ask("你好，你是谁"))

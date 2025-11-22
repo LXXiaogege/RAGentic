@@ -10,7 +10,7 @@ from langchain_core.documents import Document
 from src.data_process.processors.text_processor import TextProcessor
 from src.data_process.loaders.document_loader import DocumentLoader
 import os
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 
 logger = setup_logger(__name__)
 

@@ -7,7 +7,7 @@
 """
 import os
 from src.cores.pipeline import QAPipeline
-from src.config.config import QAPipelineConfig
+from src.configs.config import QAPipelineConfig
 from langfuse import get_client
 
 config = QAPipelineConfig()

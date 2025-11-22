@@ -6,11 +6,11 @@
 @IDE ：PyCharm
 """
 from pymilvus import MilvusClient
-from src.config.config import QAPipelineConfig
+from src.configs.retrieve_config import MilvusConfig
 from src.db_services.milvus.database_manager import MilvusDBManager
 from src.db_services.milvus.collection_manager import MilvusCollectionManager
 from src.db_services.milvus.data_service import MilvusDataService
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 from typing import Union, List, Optional, Dict, Any
 import numpy as np
 from src.db_services.milvus.data_service import SearchSettings
@@ -23,7 +23,7 @@ class MilvusConnectionManager:
     统一的 Milvus 数据库入口类
     """
 
-    def __init__(self, config: QAPipelineConfig, embeddings, text_splitter):
+    def __init__(self, embeddings, text_splitter, config: MilvusConfig):
         """
         初始化 Milvus 数据库
 
@@ -72,9 +72,8 @@ class MilvusConnectionManager:
         self.data_service = MilvusDataService(
             collection_manager=self.collection_manager,
             embeddings=self.embeddings,
-            collection_name=self.config.collection_name,
+            text_splitter=self.text_splitter,
             config=self.config,
-            text_splitter=self.text_splitter
         )
 
         # 保持向后兼容的属性

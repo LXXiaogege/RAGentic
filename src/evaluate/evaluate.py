@@ -11,8 +11,8 @@ from bert_score import score as bert_score_func
 from typing import List, Dict, Optional
 import re
 import json
-from src.config.config import QAPipelineConfig
-from src.config.logger_config import setup_logger
+from src.configs.evaluate_config import EvaluationConfig
+from src.configs.logger_config import setup_logger
 from langfuse import observe
 
 logger = setup_logger(__name__)
@@ -24,7 +24,7 @@ class QAEvaluator:
         self.logger.info("初始化问答评估器...")
         self.qa_pipeline = qa_pipeline  # QAPipeline 实例
         self.llm = qa_pipeline.llm_caller
-        self.config = QAPipelineConfig()
+        self.config = EvaluationConfig()
         self.logger.info("问答评估器初始化完成")
 
     def _extract_answer(self, raw_answer: str) -> str:

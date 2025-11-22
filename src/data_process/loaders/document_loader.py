@@ -11,7 +11,7 @@ from langchain_community.document_loaders import PyPDFLoader, UnstructuredMarkdo
     UnstructuredWordDocumentLoader, \
     UnstructuredExcelLoader, TextLoader
 
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 import os
 import subprocess
 

@@ -11,22 +11,21 @@ from typing import Union, List, Dict
 # from openai import OpenAI
 from langfuse.openai import OpenAI
 from src.utils.utils import get_text_hash
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
+from src.configs.model_config import EmbeddingConfig
 from langfuse import observe
 
 logger = setup_logger(__name__)
 
 
 class TextEmbedding:
-    def __init__(self, api_key: str, base_url: str, model: str = "text2vec",
-                 cache_path: str = "../../data/embeddings/embedding_cache.json"):
+    def __init__(self, config: EmbeddingConfig):
         self.logger = logger
+        self.config = config
         self.logger.info("初始化文本嵌入模型...")
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.model = model
-        self.cache_path = cache_path
-        self.logger.debug(f"使用模型: {model}")
-        self.logger.debug(f"缓存路径: {cache_path}")
+        self.client = OpenAI(api_key=self.config.api_key, base_url=self.config.base_url)
+        self.logger.debug(f"使用模型: {self.config.model}")
+        self.logger.debug(f"缓存路径: {self.config.cache_path}")
 
         self.cache: Dict[str, List[float]] = self._load_cache()
         self.logger.info("文本嵌入模型初始化完成")
@@ -34,9 +33,9 @@ class TextEmbedding:
     def _load_cache(self) -> Dict[str, List[float]]:
         """加载嵌入向量缓存"""
         self.logger.debug("加载嵌入向量缓存...")
-        if os.path.exists(self.cache_path):
+        if os.path.exists(self.config.cache_path):
             try:
-                with open(self.cache_path, "r", encoding="utf-8") as f:
+                with open(self.config.cache_path, "r", encoding="utf-8") as f:
                     cache = json.load(f)
                 self.logger.info(f"成功加载缓存，包含 {len(cache)} 条记录")
                 return cache
@@ -51,8 +50,8 @@ class TextEmbedding:
         """保存嵌入向量缓存"""
         self.logger.debug("保存嵌入向量缓存...")
         try:
-            os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
-            with open(self.cache_path, "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(self.config.cache_path), exist_ok=True)
+            with open(self.config.cache_path, "w", encoding="utf-8") as f:
                 json.dump(self.cache, f)
             self.logger.info(f"成功保存缓存，包含 {len(self.cache)} 条记录")
         except Exception as e:
@@ -85,10 +84,9 @@ class TextEmbedding:
                 continue
 
             try:
-                # 生成新的嵌入向量
                 self.logger.debug(f"生成新的嵌入向量: {text_hash[:8]}...")
                 response = self.client.embeddings.create(
-                    model=self.model,
+                    model=self.config.model,
                     input=t
                 )
                 embedding = response.data[0].embedding
@@ -108,24 +106,3 @@ class TextEmbedding:
 
         self.logger.info(f"成功生成所有文本的嵌入向量")
         return results
-
-
-# 使用示例
-if __name__ == "__main__":
-    # 创建嵌入实例
-    from src.config.config import QAPipelineConfig
-
-    config = QAPipelineConfig()
-    embedder = TextEmbedding(api_key=config.embedding_api_key, base_url=config.embedding_base_url,
-                             model=config.embedding_model)
-
-    # 测试单个文本
-    text = "测试嵌入模型调用"
-    embedding = embedder.get_embedding(text)[0]
-    print(f"文本 '{text}' 的嵌入向量维度: {len(embedding)}")
-
-    # 测试多个文本
-    texts = ["第一个测试文本", "第二个测试文本"]
-    embeddings = embedder.get_embedding(texts)
-    print(f"处理了 {len(embeddings)} 个文本")
-    print(f"每个文本的嵌入向量维度: {len(embeddings[0])}")

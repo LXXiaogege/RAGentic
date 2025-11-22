@@ -22,8 +22,9 @@ uv sync
 - LangGraph 流式：参考 `tests/test_pipline_langgraph.py`
 
 ### 快速开始（代码片段）
+
 ```python
-from src.config.config import QAPipelineConfig
+from src.configs.config import QAPipelineConfig
 from src.cores.pipline_langgraph import LangGraphQAPipeline
 
 config = QAPipelineConfig()

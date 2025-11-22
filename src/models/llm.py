@@ -6,14 +6,20 @@
 @IDE ：PyCharm
 """
 from typing import List, Dict, Union, cast
-from src.config.config import QAPipelineConfig
+from src.configs.model_config import LLMConfig
 from openai.types.chat import ChatCompletionMessageParam
 # from openai import OpenAI
 from langfuse.openai import OpenAI
-from src.config.logger_config import setup_logger
-from langchain_core.messages import BaseMessage
+from src.configs.logger_config import setup_logger
+from langchain_core.messages import BaseMessage, SystemMessage
 from langfuse import observe
-
+from langchain_core.messages import (
+    HumanMessage,
+    AIMessage,
+    SystemMessage,
+    FunctionMessage,
+    ToolMessage,
+)
 logger = setup_logger(__name__)
 
 
@@ -61,66 +67,46 @@ class OpenAILLM(BaseLLM):
 
 
 class LLMWrapper:
-    def __init__(self, config: QAPipelineConfig):
+    def __init__(self, config: LLMConfig):
         self.logger = setup_logger(f"{__name__}.LLMWrapper")
-        provider = config.llm_provider
-        self.model = config.llm_model
-
-        if provider == "openai":
-            self.client = OpenAILLM(config.llm_api_key, config.llm_base_url)
+        self.config = config
+        if self.config.provider == "openai":
+            self.client = OpenAILLM(self.config.api_key, self.config.base_url)
         else:
-            raise ValueError(f"暂不支持的模型提供商: {provider}")
+            raise ValueError(f"暂不支持的模型提供商: {self.config.provider}")
 
     def convert_messages_to_dicts(self, messages: List[BaseMessage]) -> List[Dict]:
+        # type_to_role = {
+        #     "human": "user",
+        #     "ai": "assistant",
+        #     "system": "system",
+        #     "function": "function",
+        #     "tool": "tool",
+        # }
         type_to_role = {
-            "human": "user",
-            "ai": "assistant",
-            "system": "system",
-            "function": "function",
-            "tool": "tool",
+            HumanMessage: "user",
+            AIMessage: "assistant",
+            SystemMessage: "system",
+            FunctionMessage: "function",
+            ToolMessage: "tool",
         }
-
         formatted = []
         for msg in messages:
-            role = type_to_role.get(msg.get("type"))
+            role = None
+            for msg_type, role_name in type_to_role.items():
+                if isinstance(msg, msg_type):
+                    role = role_name
+                    break
             if role is None:
-                raise ValueError(f"Unsupported message type: {msg.get('type')}")
-            formatted.append({"role": role, "content": msg.get("content")})
+                raise ValueError(f"Unknown message type: {type(msg)}")
+            formatted.append({"role": role, "content": msg.content})
         return formatted
 
     def chat(self, messages: List[Union[Dict, BaseMessage]], stream: bool = False, return_raw: bool = False, **kwargs):
         # 如果是 LangChain 消息，先转换为 OpenAI 所需格式
         if messages and isinstance(messages[0], BaseMessage):
             messages = self.convert_messages_to_dicts(messages)
-        response = self.client.chat(model=self.model, messages=messages, stream=stream, **kwargs)
+        response = self.client.chat(model=self.config.model, messages=messages, stream=stream, **kwargs)
         if return_raw or stream:
             return response  # 返回完整响应，适合高级用法
         return response.choices[0].message.content  # 默认解析出content
-
-
-if __name__ == '__main__':
-    # SiliconFlow 参数配置（请根据自己账号填写）
-    from src.config.config import QAPipelineConfig
-
-    llm_api_key: str = QAPipelineConfig.llm_api_key
-    llm_base_url: str = QAPipelineConfig.llm_base_url
-    llm_model: str = QAPipelineConfig.llm_model
-
-    llm = OpenAILLM(api_key=llm_api_key, base_url=llm_base_url)
-
-    messages = [
-        {"role": "user", "content": "请简要介绍一下SiliconFlow是什么？请简要回答"}
-    ]
-
-    # 非流式调用测试
-    response = llm.chat(model=llm_model, messages=messages)
-    content = response.choices[0].message.content
-    print("[✅ 非流式输出内容]:", content)
-
-    # 流式调用测试
-    # print("[✅ 流式输出内容]:", end="", flush=True)
-    # response_stream = llm.chat(model=model, messages=messages, stream=True)
-    # for chunk in response_stream:
-    #     delta = chunk.choices[0].delta
-    #     print(delta.content or "", end="", flush=True)
-    # print("\n[✅ 流式输出完成]")

@@ -6,7 +6,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from src.models.llm import LLMWrapper
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 import json
 import shutil
 import os
@@ -16,16 +16,14 @@ logger = setup_logger(__name__)
 
 
 class MCPClient:
-    def __init__(self, config):
-        # Initialize session and client objects
+    def __init__(self, llm: LLMWrapper):
         self.session: Optional[ClientSession] = None
         self.stdio = None
         self.write = None
         self.exit_stack = AsyncExitStack()
-        self.config = config
-        self.llm = LLMWrapper(self.config)
         self.available_tools = []  # 存储实际可用的工具
-        logger.info("MCPClient initialized with config")
+
+        self.llm = llm
 
     async def connect_to_server(self, server_script_path: str):
         """Connect to an MCP server
@@ -231,14 +229,3 @@ async def mcp_main(client, query):
     finally:
         await client.cleanup()
         logger.info("MCP main completed")
-
-
-if __name__ == "__main__":
-    from src.config.config import QAPipelineConfig
-
-    config = QAPipelineConfig()
-    client = MCPClient(config)
-    query = '洛杉矶今天天气怎么样？'
-    # query = '今天百度第一条新闻是什么?'
-    tool_result = asyncio.run(mcp_main(client, query))
-    pass

@@ -18,15 +18,15 @@ from ragas.metrics import (
 from ragas import evaluate
 from ragas.llms import LangchainLLMWrapper
 from langchain_openai import ChatOpenAI
-from src.config.config import QAPipelineConfig
-from src.config.logger_config import setup_logger
+from src.configs.evaluate_config import EvaluationConfig
+from src.configs.logger_config import setup_logger
 
 # 设置日志记录器
 logger = setup_logger(__name__)
 
 
 class RAGASEvaluator:
-    def __init__(self, config: Optional[QAPipelineConfig] = None):
+    def __init__(self, config: EvaluationConfig = None):
         """
         初始化评估器，可自定义评估指标
         
@@ -35,7 +35,7 @@ class RAGASEvaluator:
         """
         self.logger = logger
         self.logger.info("Initializing RAGAS Evaluator")
-        self.config = config or QAPipelineConfig()
+        self.config = config
 
         # 设置评估指标
         metric_map = {
@@ -51,10 +51,6 @@ class RAGASEvaluator:
 
         self.evaluator_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o"))
         self.logger.info("Initialized evaluator LLM with GPT-4")
-        # self.config = QAPipelineConfig()
-        # self.evaluator_llm = LangchainLLMWrapper(
-        #     ChatOpenAI(model=self.config.llm_model, api_key=self.config.llm_api_key,
-        #                base_url=self.config.llm_base_url))
 
     def prepare_dataset(self, qa_data: List[Dict]) -> Dataset:
         """

@@ -7,7 +7,7 @@
 """
 from pymilvus import DataType
 
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 from src.db_services.milvus.database_manager import MilvusDBManager
 logger = setup_logger(__name__)
 

@@ -20,8 +20,8 @@ from a2a.types import (
     TextPart,
 )
 from src.cores.qa_agent import QA_Agent, QAState
-from src.config.config import QAPipelineConfig
-from src.config.logger_config import setup_logger
+from src.configs.config import QAPipelineConfig
+from src.configs.logger_config import setup_logger
 
 logger = setup_logger(__name__)
 

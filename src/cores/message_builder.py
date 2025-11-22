@@ -8,14 +8,14 @@
 
 from typing import List, Dict, Optional
 import tiktoken
-from src.config.config import QAPipelineConfig
-from src.config.logger_config import setup_logger
+from src.configs.retrieve_config import MessageBuilderConfig
+from src.configs.logger_config import setup_logger
 
 logger = setup_logger(__name__)
 
 
 class MessageBuilder:
-    def __init__(self, config: QAPipelineConfig):
+    def __init__(self, config: MessageBuilderConfig):
         self.logger = logger
         self.logger.info("初始化消息构建器...")
         self.config = config

@@ -7,12 +7,12 @@
 """
 from pymilvus.model.reranker import CrossEncoderRerankFunction
 
-from src.config.config import QAPipelineConfig
-from src.config.logger_config import setup_logger
+from src.configs.retrieve_config import MilvusConfig, SearchConfig
+from src.configs.logger_config import setup_logger
 from src.data_process.processor import DataProcessor
 from src.utils.utils import get_text_hash
 from src.db_services.milvus.collection_manager import MilvusCollectionManager
-
+from src.models.embedding import TextEmbedding
 from typing import Union, List, Optional, Dict, Any
 import numpy as np
 from langfuse import observe
@@ -48,27 +48,30 @@ class SearchSettings(BaseModel):
 
 
 class MilvusDataService:
-    def __init__(self, collection_manager: MilvusCollectionManager, embeddings, collection_name: str,
-                 config: QAPipelineConfig, text_splitter):
+    def __init__(self, collection_manager: MilvusCollectionManager, embeddings: TextEmbedding, text_splitter,
+                 config: MilvusConfig):
         self.logger = logger
-        self.config = config
+        self.milvus_config = config
         self.client = collection_manager.client
         self.embeddings = embeddings
         self.data_processor = DataProcessor(text_splitter)
-        self.bm25_func = BM25EmbeddingFunction(analyzer=build_default_analyzer(language=self.config.bm25_language))
-        self.bm25_model_path = os.path.join(self.config.bm25_model_dir, collection_name + "_bm25.pkl")
+        self.bm25_func = BM25EmbeddingFunction(
+            analyzer=build_default_analyzer(language=self.milvus_config.bm25_language)
+        )
+        self.bm25_model_path = os.path.join(self.milvus_config.bm25_model_dir,
+                                            self.milvus_config.collection_name + "_bm25.pkl")
         if self.bm25_model_path and os.path.exists(self.bm25_model_path):
             self.bm25_func.load(self.bm25_model_path)
             self.logger.info(f"已加载 BM25 模型: {self.bm25_model_path}")
 
         self.rerank_function = CrossEncoderRerankFunction(
-            model_name=self.config.cross_encoder_model_path,
-            device=self.config.cross_encoder_device
+            model_name=self.milvus_config.rerank_model_path,
+            device=self.milvus_config.rerank_device
         )
 
     def load_bm25_model(self, texts: List[str]):
         self.logger.info("开始加载/训练 BM25 模型...")
-        os.makedirs(self.config.bm25_model_dir, exist_ok=True)
+        os.makedirs(self.milvus_config.bm25_model_dir, exist_ok=True)
         model_path = self.bm25_model_path
         meta_path = model_path + ".meta.json"
         texts_hash = get_text_hash(''.join(texts[:10]))
@@ -134,7 +137,7 @@ class MilvusDataService:
         """插入新向量记录"""
         if not records:
             return
-        self.client.insert(collection_name=self.config.collection_name, data=records)
+        self.client.insert(collection_name=self.milvus_config.collection_name, data=records)
 
     def delete_by_ids(self, collection_name: str, ids: Optional[Union[list, str, int]]):
         """按ID删除"""
@@ -157,20 +160,20 @@ class MilvusDataService:
         backup_data = self._backup_records(update_ids)
         try:
             self.logger.info(f"开始更新 {len(records)} 条文档，再删除旧数据")
-            self.client.delete(collection_name=self.config.collection_name, ids=update_ids)
-            self.client.insert(collection_name=self.config.collection_name, data=records)
+            self.client.delete(collection_name=self.milvus_config.collection_name, ids=update_ids)
+            self.client.insert(collection_name=self.milvus_config.collection_name, data=records)
             self.logger.info(f"成功更新 {len(records)} 条已有文档")
         except Exception as update_error:
             self.logger.error(f"更新文档失败，尝试恢复旧数据: {update_error}")
             if backup_data:
                 try:
-                    self.client.insert(collection_name=self.config.collection_name, data=backup_data)
+                    self.client.insert(collection_name=self.milvus_config.collection_name, data=backup_data)
                     self.logger.info("回滚成功")
                 except Exception as rollback_error:
                     self.logger.critical(f"回滚失败，需要人工检查: {rollback_error}")
             raise
 
-    def retrieve(self, query: Union[str, List[float], np.ndarray], k: int = 10, use_sparse: bool = True):
+    def retrieve(self, query: Union[str, List[float], np.ndarray], config: SearchConfig):
         """文档召回"""
         # 获取稠密向量
         if isinstance(query, str):
@@ -183,7 +186,7 @@ class MilvusDataService:
 
         # 获取稀疏向量（若启用）
         sparse_vec = None
-        if use_sparse:
+        if config.use_sparse:
             self.logger.debug("生成查询的稀疏向量...")
             sparse_vec = self.bm25_func.encode_queries([query])
 
@@ -193,17 +196,17 @@ class MilvusDataService:
             data=[dense_vec],
             anns_field="dense_vec",
             param={"metric_type": "COSINE"},
-            limit=k * self.config.search_multiplier,
+            limit=config.top_k * config.search_multiplier,
         )
         req_list.append(dense_search_param)
 
         # 稀疏召回（可选）
-        if use_sparse and sparse_vec is not None:
+        if config.use_sparse and sparse_vec is not None:
             sparse_search_param = AnnSearchRequest(
                 data=[sparse_vec],
                 anns_field="bm25_vec",
                 param={"metric_type": "IP"},
-                limit=k * self.config.search_multiplier,
+                limit=config.top_k * config.search_multiplier,
             )
             req_list.append(sparse_search_param)
 
@@ -211,10 +214,10 @@ class MilvusDataService:
         if len(req_list) > 1:
             self.logger.debug("使用混合搜索（稠密+稀疏）")
             docs = self.client.hybrid_search(
-                self.config.collection_name,
+                self.milvus_config.collection_name,
                 req_list,
                 RRFRanker(),  # Reciprocal Rank Fusion，轻量级排序器
-                k,
+                config.top_k,
                 output_fields=[
                     "id",
                     "text",
@@ -224,24 +227,20 @@ class MilvusDataService:
         else:
             self.logger.debug("使用单一稠密搜索")
             docs = self.client.search(
-                self.config.collection_name,
+                self.milvus_config.collection_name,
                 data=[dense_vec],
                 anns_field="dense_vec",
-                limit=k,
-                output_fields=[
-                    "id",
-                    "text",
-                    "metadata"
-                ],
+                limit=config.top_k,
+                output_fields=["id", "text", "metadata"],
             )
         return docs
 
-    def rerank(self, query: str, docs, k: int, use_contextualize=False):
+    def rerank(self, query: str, docs, config: SearchConfig):
         """重排序"""
         self.logger.info("开始重排序...")
         rerank_texts = []
         for hit in docs[0]:
-            if use_contextualize:
+            if config.use_contextualize_embedding:
                 rerank_texts.append(
                     f"{hit['entity']['text']}\n\n{hit['entity']['context']}"
                 )
@@ -254,41 +253,27 @@ class MilvusDataService:
             key=lambda x: x[1].score,
             reverse=True
         )
-        docs[0] = [item[0] for item in reranked[:k]]
+        docs[0] = [item[0] for item in reranked[:config.top_k]]
         self.logger.info("重排序完成")
         return docs
 
     @observe(name="MilvusDB.search", as_type="retriever")
-    def search(self, query: Union[str, List[float], np.array],
-               settings: Optional[SearchSettings] = None) -> List[Dict[str, Any]]:
+    def search(self, query: Union[str, List[float], np.array], config: SearchConfig) -> List[Dict[str, Any]]:
         """
         多路召回 + 多策略重排序：dense + sparse + RRFRanker + CrossEncoder rerank
         """
         self.logger.info("开始搜索...")
-        # 使用配置中的默认值
-        # 1. 首先，使用类中存储的“默认值”
-        k = self.config.search_top_k
-        use_sparse = self.config.use_sparse_search
-        use_reranker = self.config.use_reranker
-        use_contextualize = self.config.use_contextualize_embedding
 
-        # 2. 然后，如果传入了 settings，就用它来“覆盖”默认值（前台等）
-        if settings:
-            k = settings.k if settings.k is not None else k
-            use_sparse = settings.use_sparse if settings.use_sparse is not None else use_sparse
-            use_reranker = settings.use_reranker if settings.use_reranker is not None else use_reranker
-            use_contextualize = settings.use_contextualize_embedding if settings.use_contextualize_embedding is not None else use_contextualize
+        docs = self.retrieve(query, config)
 
-        docs = self.retrieve(query, k, use_sparse)
-
-        if use_reranker:
-            docs = self.rerank(query, docs, k, use_contextualize)
+        if config.use_reranker:
+            docs = self.rerank(query, docs, config)
         else:
-            docs = docs[:k]
+            docs = docs[:config.top_k]
 
         # 统一输出格式
         results = []
-        for hit in docs[0][:k]:
+        for hit in docs[0][:config.top_k]:
             entity = hit["entity"]
             results.append({
                 "score": hit["score"] if "score" in hit else None,
@@ -308,7 +293,7 @@ class MilvusDataService:
             quoted_ids = [f'"{id_}"' for id_ in ids]
             filter_expr = f"id in [{', '.join(quoted_ids)}]"
             results = self.client.query(
-                collection_name=self.config.collection_name,
+                collection_name=self.milvus_config.collection_name,
                 filter=filter_expr,
                 output_fields=["id", "text", "metadata", "dense_vec", "bm25_vec"]
             )
@@ -332,7 +317,7 @@ class MilvusDataService:
                 quoted_ids = [f'"{id_}"' for id_ in ids]
                 filter_expr = f"id in [{', '.join(quoted_ids)}]"
                 results = self.client.query(
-                    collection_name=self.config.collection_name,
+                    collection_name=self.milvus_config.collection_name,
                     filter=filter_expr,
                     output_fields=["id"]
                 )
@@ -353,7 +338,7 @@ class MilvusDataService:
                                                                        bm25_vectors):
                 record = {
                     "id": id_,
-                    "text": truncate_by_bytes(text, self.config.max_text_length),
+                    "text": truncate_by_bytes(text, self.milvus_config.max_text_length),
                     "metadata": str(meta_data),
                     "dense_vec": dense_vector,
                     "bm25_vec": bm25_vector

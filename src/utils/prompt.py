@@ -2,11 +2,11 @@
 """
 @Time ： 2025/10/10 14:53
 @Auth ： 吕鑫
-@File ：prompt.py
+@File ：prompt_config.py
 @IDE ：PyCharm
 """
 
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 from typing import Optional, Union, Literal, Dict, Any
 
 logger = setup_logger(__name__)
@@ -128,7 +128,7 @@ class PromptManager:
         return None
 
     def _try_local(self, name: str, compile_vars: Optional[Dict[str, Any]] = None) -> Optional[str]:
-        """从本地 config 获取（并用 compile_vars 格式化字符串）"""
+        """从本地 configs 获取（并用 compile_vars 格式化字符串）"""
         if not self.config:
             return None
         local_prompt = self.config.get(name)

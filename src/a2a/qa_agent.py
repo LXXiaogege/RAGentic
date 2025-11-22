@@ -16,11 +16,11 @@ from langchain_core.runnables import RunnableConfig
 import asyncio
 import concurrent.futures
 
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
+from src.configs.config import AppConfig
 from src.models.embedding import TextEmbedding
 from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.models.llm import LLMWrapper
-from src.config.config import QAPipelineConfig
 from src.cores.query_transformer import QueryTransformer
 from src.mcp.mcp_client import MCPClient, mcp_main
 from src.cores.message_builder import MessageBuilder
@@ -99,7 +99,7 @@ def build_prompt_messages(
 class QA_Agent:
     """基于LangGraph的QA Pipeline"""
 
-    def __init__(self, config: QAPipelineConfig):
+    def __init__(self, config: AppConfig):
         self.config = config
         self._init_components()
         self._build_graph()
@@ -109,38 +109,26 @@ class QA_Agent:
         logger.info("初始化QA Pipeline组件...")
 
         # 文本嵌入
-        self.embeddings = TextEmbedding(
-            api_key=self.config.embedding_api_key,
-            base_url=self.config.embedding_base_url,
-            model=self.config.embedding_model,
-            cache_path=self.config.embedding_cache_path
-        )
+        self.embeddings = TextEmbedding(self.config.embedding)
 
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.config.chunk_size,
             chunk_overlap=self.config.chunk_overlap
         )
-        self.message_builder = MessageBuilder(self.config)
+        self.message_builder = MessageBuilder(self.config.message_builder)
 
         # 向量数据库
-        self.db_connection_manager = MilvusConnectionManager(
-            self.config, self.embeddings,
-            self.text_splitter
-        )
+        self.db_connection_manager = MilvusConnectionManager(self.embeddings, self.text_splitter, self.config.milvus)
 
         # LLM包装器
-        self.llm_caller = LLMWrapper(self.config)
+        self.llm_caller = LLMWrapper(self.config.llm)
 
         # 查询转换器
-        self.query_transformer = QueryTransformer(
-            self.llm_caller, self.config,
-            message_builder=MessageBuilder(self.config),
-            embeddings=self.embeddings,
-            db_connection_manager=self.db_connection_manager
-        )
+        self.query_transformer = QueryTransformer(self.llm_caller, self.message_builder, self.embeddings,
+                                                  self.db_connection_manager, self.config.rewrite)
 
         # MCP客户端
-        self.mcp_client = MCPClient(self.config)
+        self.mcp_client = MCPClient(self.llm_caller)
 
         # 检查点保存器
         self.checkpointer = MemorySaver()
@@ -502,11 +490,11 @@ class QA_Agent:
     # =================== 外部接口 ===================
     def _build_config_and_state(self, query: str, **kwargs) -> (RunnableConfig, dict):
         """
-        构建 config 和初始 state
+        构建 configs 和初始 state
 
         :param query: 用户输入的查询
         :param kwargs: 其他动态参数
-        :return: (config, initial_state)
+        :return: (configs, initial_state)
         """
         config = RunnableConfig(
             configurable={

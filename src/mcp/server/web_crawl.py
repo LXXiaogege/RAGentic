@@ -7,7 +7,7 @@
 """
 # from mcp.server.fastmcp import FastMCP
 from src.agent.tools import WebSpider
-from src.config.logger_config import setup_logger
+from src.configs.logger_config import setup_logger
 from fastmcp import FastMCP
 
 

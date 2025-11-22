@@ -32,6 +32,8 @@ dependencies = [
     "bert-score",
     "jieba>=0.42.1",
     "nltk>=3.9.2",
+    # Web 界面
+    "gradio",
 ]
 
 [[tool.uv.index]]
