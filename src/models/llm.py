@@ -11,15 +11,9 @@ from openai.types.chat import ChatCompletionMessageParam
 # from openai import OpenAI
 from langfuse.openai import OpenAI
 from src.configs.logger_config import setup_logger
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, FunctionMessage, ToolMessage
 from langfuse import observe
-from langchain_core.messages import (
-    HumanMessage,
-    AIMessage,
-    SystemMessage,
-    FunctionMessage,
-    ToolMessage,
-)
+
 logger = setup_logger(__name__)
 
 
@@ -76,13 +70,6 @@ class LLMWrapper:
             raise ValueError(f"暂不支持的模型提供商: {self.config.provider}")
 
     def convert_messages_to_dicts(self, messages: List[BaseMessage]) -> List[Dict]:
-        # type_to_role = {
-        #     "human": "user",
-        #     "ai": "assistant",
-        #     "system": "system",
-        #     "function": "function",
-        #     "tool": "tool",
-        # }
         type_to_role = {
             HumanMessage: "user",
             AIMessage: "assistant",
