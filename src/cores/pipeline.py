@@ -85,11 +85,11 @@ class QAPipeline:
         self.logger.info("知识库构建完成")
 
     @observe(name="QAPipeline._build_messages")
-    def _build_messages(self, query):
+    async def _build_messages(self, query):
         system_prompt = self.prompt_manager.get_prompt(
             "kb_system_prompt") if self.config.retrieve.use_kb else self.prompt_manager.get_prompt("system_prompt")
 
-        context, _ = self._prepare_context(query)
+        context, _ = await self._prepare_context(query)
         messages = self.message_builder.build(
             query=query,
             context=context,
@@ -98,43 +98,78 @@ class QAPipeline:
             system_prompt_template=system_prompt,
             no_think=self.config.retrieve.no_think,
             max_tokens=self.config.message_builder.message_max_tokens,
-            max_history_turns=self.config.retrieve.memory_window_size  # todo 记忆管理大小与message大小是否重复？
+            max_history_turns=self.config.retrieve.memory_window_size
         )
         return messages, context
 
+    def _retrieve_kb_context(self, query: str) -> tuple[str, str]:
+        """
+        执行知识库检索，返回格式化的上下文和原始检索内容。
+        如果配置未开启知识库，返回空元组。
+        """
+        retrieve_config = self.config.retrieve
+        if not retrieve_config.use_kb:
+            return "", ""
+
+        self.logger.info("🟢 开始知识库检索")
+
+        # 确定并执行检索逻辑
+        use_hyde = retrieve_config.use_rewrite and retrieve_config.rewrite_mode == 'hyde'
+
+        if use_hyde:
+            results = self.query_transformer.hyde_search(query, retrieve_config)
+        else:
+            results = self.db_connection_manager.search(query=query, search_config=retrieve_config)
+
+        # 处理检索结果
+        if results and results[0]:
+            kb_context_docs = "\n".join([f"【文档{i + 1}】{doc.get('text', '内容缺失')}"
+                                         for i, doc in enumerate(results)])
+            return f"【知识库检索内容】\n{kb_context_docs}", kb_context_docs
+        else:
+            return "【知识库检索内容】\n未检索到相关知识。", ""
+
+    async def _retrieve_tool_context(self, query: str) -> str:
+        """
+        执行工具调用，并返回格式化的上下文字符串。
+        如果配置未开启工具，返回空字符串。
+        """
+        if not self.config.retrieve.use_tool:
+            return ""
+        try:
+            tool_result = await mcp_main(self.mcp_client, query)
+        except Exception as e:
+            self.logger.error(f"❌ 工具调用失败: {e}", exc_info=True)
+            return ""
+
+        if tool_result:
+            self.logger.debug(f"✅ 工具返回内容长度: {len(tool_result)}")
+            return f"【工具返回内容】\n{tool_result}"
+
+        return ""
+
     @observe(name="QAPipline._prepare_context")
-    def _prepare_context(self, query) -> (str, str):
-
+    async def _prepare_context(self, query) -> (str, str):
         context_blocks = []
-        # Step 1: 工具调用
-        tool_context = ''
-        if self.config.retrieve.use_tool:
-            tool_result = asyncio.run(mcp_main(self.mcp_client, query))
-            if tool_result:
-                context_blocks.append(f"【工具返回内容】\n{tool_result}")
-                self.logger.debug(f"工具返回内容长度: {len(tool_result)}")
+        # --- Step 1: 工具调用 ---
+        tool_formatted_context = await self._retrieve_tool_context(query)
+        tool_context_raw = ""
+        if tool_formatted_context:
+            context_blocks.append(tool_formatted_context)
+            tool_context_raw = tool_formatted_context.split('\n', 1)[-1]
 
-        # Step 2: 知识库检索
-        kb_context = ''
-        if self.config.retrieve.use_kb:
-            self.logger.info("开始知识库检索")
-            if self.config.retrieve.use_rewrite and self.config.retrieve.rewrite_mode == 'hyde':
-                self.logger.info("使用 HyDE 方法进行检索")
-                results = self.query_transformer.hyde_search(query, self.config.retrieve.top_k)
-            else:
-                results = self.db_connection_manager.search(query=query, search_config=self.config.retrieve)
-            if not results or not results[0]:
-                kb_context = "未检索到相关知识。"
-                self.logger.warning("知识库检索未返回结果")
-            else:
-                kb_context = "\n".join([f"【文档{i + 1}】{doc['text']}" for i, doc in enumerate(results)])
-                self.logger.info(f"知识库检索返回 {len(results)} 条结果")
-            context_blocks.append(f"【知识库检索内容】\n{kb_context}")
+        # --- Step 2: 知识库检索 ---
+        kb_formatted_context, kb_context_raw = self._retrieve_kb_context(query)
+        if kb_formatted_context:
+            context_blocks.append(kb_formatted_context)
 
-        return "\n\n".join(context_blocks), kb_context or tool_context
+        # --- Step 3: 结果组装 ---
+        final_context = "\n\n".join(context_blocks)
+        summary_context = kb_context_raw or tool_context_raw
+        return final_context, summary_context
 
     @observe(name="QAPipline.ask", as_type="chain")
-    def ask(self, query: str, config: SearchConfig = None) -> Dict:
+    async def ask(self, query: str, config: SearchConfig = None) -> Dict:
 
         if config:
             self.config.retrieve = config
@@ -157,9 +192,9 @@ class QAPipeline:
 
             self.logger.debug(
                 f"查询参数: k={self.config.retrieve.top_k}, use_sparse={self.config.retrieve.use_sparse}, use_reranker={self.config.retrieve.use_reranker}")
-            messages, context = self._build_messages(query)
+            messages, context = await self._build_messages(query)
             self.logger.info("开始调用 LLM 生成回答")
-            answer = self.llm_caller.chat(messages)
+            answer = await self.llm_caller.achat(messages)
             self.logger.info("LLM 回答生成完成")
 
             if self.config.retrieve.use_memory:
@@ -172,7 +207,7 @@ class QAPipeline:
             return {"error": f"处理请求时出错: {str(e)}"}
 
     @observe(name="QAPipline.ask_stream")
-    def ask_stream(self, query: str, config: SearchConfig = None):
+    async def ask_stream(self, query: str, config: SearchConfig = None):
 
         if config:
             self.config.retrieve = config
@@ -189,10 +224,9 @@ class QAPipeline:
 
             self.logger.debug(
                 f"流式查询参数: k={self.config.retrieve.top_k}, use_sparse={self.config.retrieve.use_sparse}, use_reranker={self.config.retrieve.use_reranker}")
-            messages, context = self._build_messages(query)
+            messages, context = await self._build_messages(query)
             self.logger.info("开始流式调用 LLM")
-            stream = self.llm_caller.chat(messages, stream=True)
-
+            stream = await self.llm_caller.achat(messages, stream=True)
             answer = ""
             for chunk in stream:
                 delta = getattr(chunk.choices[0].delta, 'content', None)
@@ -210,14 +244,17 @@ class QAPipeline:
             yield {"error": f"处理请求时出错: {str(e)}"}
 
     @observe(name="QAPipline.batch_ask")
-    def batch_ask(self, questions: List[str]) -> List[Dict]:
+    async def batch_ask(self, questions: List[str]) -> List[Dict]:
         self.logger.info(f"开始批量处理 {len(questions)} 个问题")
-        results = [self.ask(q) for q in questions]
+        # 创建一系列异步任务
+        tasks = [self.ask(q) for q in questions]
+        # 使用 asyncio.gather 并发执行所有任务
+        results = await asyncio.gather(*tasks)
         self.logger.info("批量处理完成")
         return results
 
     @observe(name="QAPipline.evaluate")
-    def evaluate(self, qa_pairs):
+    async def evaluate(self, qa_pairs):
         """
         评估问答对
         
@@ -228,17 +265,22 @@ class QAPipeline:
 
         if self.config.evaluation.eval_method == "ragas":
             self.logger.info("使用 RAGAS 评估方法")
+
             # 准备 RAGAS 评估数据
-            qa_data = []
-            for pair in qa_pairs:
-                result = self.ask(pair["question"])
-                qa_data.append({
+            async def run_and_format_ask(pair):
+                """内部异步函数，用于执行 ask 并格式化 RAGAS 需要的数据"""
+                result = await self.ask(pair["question"])
+                return {
                     "query": pair["question"],
                     "prediction": result["answer"],
-                    "contexts": result["context"].split("\n") if result["context"] else [],
+                    # 使用 get() 增加健壮性，防止 context 为 None
+                    "contexts": result.get("context", "").split("\n") if result.get("context") else [],
                     "ground_truths": [pair["answer"]]
-                })
+                }
 
+            # 使用 asyncio.gather 并发执行所有问答任务
+            tasks = [run_and_format_ask(pair) for pair in qa_pairs]
+            qa_data = await asyncio.gather(*tasks)
             # 执行 RAGAS 评估
             results = self.ragas_evaluator.evaluate(qa_data)
             self.logger.info("RAGAS 评估完成")

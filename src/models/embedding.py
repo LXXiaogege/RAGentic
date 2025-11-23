@@ -9,7 +9,7 @@ import json
 import os
 from typing import Union, List, Dict
 # from openai import OpenAI
-from langfuse.openai import OpenAI
+from langfuse.openai import OpenAI,AsyncOpenAI
 from src.utils.utils import get_text_hash
 from src.configs.logger_config import setup_logger
 from src.configs.model_config import EmbeddingConfig
@@ -23,7 +23,7 @@ class TextEmbedding:
         self.logger = logger
         self.config = config
         self.logger.info("初始化文本嵌入模型...")
-        self.client = OpenAI(api_key=self.config.api_key, base_url=self.config.base_url)
+        self.client = AsyncOpenAI(api_key=self.config.api_key, base_url=self.config.base_url)
         self.logger.debug(f"使用模型: {self.config.model}")
         self.logger.debug(f"缓存路径: {self.config.cache_path}")
 

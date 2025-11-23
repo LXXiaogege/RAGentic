@@ -17,8 +17,7 @@ import os
 import uuid
 import gradio as gr
 from langfuse import get_client
-
-# 假设这些模块都在你的项目中，保持引用不变
+import asyncio
 from src.cores.pipeline import QAPipeline
 from src.configs.config import AppConfig
 from src.configs.logger_config import setup_logger
@@ -46,8 +45,7 @@ pipeline = QAPipeline(config, langfuse_client)
 logger.info("QAPipeline 初始化完成")
 
 
-# ================= 逻辑函数 (保持不变) =================
-def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, no_think,
+async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, no_think,
              session_id, history):
     """同步问答接口"""
     if not query or not query.strip():
@@ -66,7 +64,7 @@ def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranke
         session_id=session_id
     )
     try:
-        result = pipeline.ask(query=query, config=search_config)
+        result = await pipeline.ask(query=query, config=search_config)
         if "error" in result:
             answer = f"❌ 错误: {result['error']}"
         else:
@@ -83,7 +81,7 @@ def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranke
         return "", history
 
 
-def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, no_think, session_id,
+async def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, no_think, session_id,
                 history):
     """流式问答接口"""
     if not query or not query.strip():
@@ -104,7 +102,7 @@ def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_rera
         )
         answer = ""
         history.append([query, ""])
-        for chunk in pipeline.ask_stream(query, config=search_config):
+        async for chunk in pipeline.ask_stream(query, config=search_config):
             if "error" in chunk:
                 history[-1][1] = f"❌ 错误: {chunk['error']}"
                 yield history
@@ -381,7 +379,7 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
     # ================= 事件绑定 =================
 
     # 包装响应函数以处理 State
-    def respond_wrapper(message, history, kb, tool, memory, stream, k, sparse, rerank, no_think, sess_id):
+    async def respond_wrapper(message, history, kb, tool, memory, stream, k, sparse, rerank, no_think, sess_id):
         if not message.strip():
             yield "", history, sess_id
             return
@@ -390,12 +388,12 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
         current_sess_id = sess_id if sess_id else str(uuid.uuid4())
 
         if stream:
-            for updated_history in chat_stream(
+            async for updated_history in chat_stream(
                     message, kb, tool, memory, k, sparse, rerank, no_think, current_sess_id, history
             ):
                 yield "", updated_history, current_sess_id
         else:
-            _, updated_history = chat_ask(
+            _, updated_history = await chat_ask(
                 message, kb, tool, memory, k, sparse, rerank, no_think, current_sess_id, history
             )
             yield "", updated_history, current_sess_id

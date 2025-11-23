@@ -9,7 +9,7 @@ from typing import List, Dict, Union, cast
 from src.configs.model_config import LLMConfig
 from openai.types.chat import ChatCompletionMessageParam
 # from openai import OpenAI
-from langfuse.openai import OpenAI
+from langfuse.openai import OpenAI, AsyncOpenAI
 from src.configs.logger_config import setup_logger
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, FunctionMessage, ToolMessage
 from langfuse import observe
@@ -21,14 +21,15 @@ class BaseLLM:
     def chat(self, model: str, messages: List[ChatCompletionMessageParam], stream: bool = False, **kwargs):
         raise NotImplementedError
 
+    async def achat(self, model: str, messages: List[ChatCompletionMessageParam], stream: bool = False, **kwargs):
+        raise NotImplementedError  # 异步接口
+
 
 class OpenAILLM(BaseLLM):
     def __init__(self, api_key: str, base_url: str):
         self.logger = setup_logger(f"{__name__}.OpenAILLM")
-        self.logger.info("初始化 OpenAI LLM 客户端...")
         self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.logger.debug(f"使用 API 基础 URL: {base_url}")
-        self.logger.info("OpenAI LLM 客户端初始化完成")
+        self.aclient = AsyncOpenAI(api_key=api_key, base_url=base_url)  # <--- 初始化异步客户端
 
     @observe(name="LLMWrapper.chat", as_type="generation")
     def chat(self, model: str, messages: List[dict], stream: bool = False, **kwargs):
@@ -54,6 +55,25 @@ class OpenAILLM(BaseLLM):
                 **kwargs
             )
             self.logger.info("成功获取模型响应")
+            return response
+        except Exception as e:
+            self.logger.exception(f"调用模型时发生错误: {str(e)}")
+            raise
+
+    @observe(name="LLMWrapper.achat", as_type="generation")
+    async def achat(self, model: str, messages: List[dict], stream: bool = False, **kwargs):
+        """
+        与 LLM 进行异步对话
+        """
+        typed_messages = cast(List[ChatCompletionMessageParam], messages)
+        try:
+            response = await self.aclient.chat.completions.create(
+                model=model,
+                messages=typed_messages,
+                stream=stream,
+                **kwargs
+            )
+            self.logger.info("成功获取模型异步响应")
             return response
         except Exception as e:
             self.logger.exception(f"调用模型时发生错误: {str(e)}")
@@ -97,3 +117,15 @@ class LLMWrapper:
         if return_raw or stream:
             return response  # 返回完整响应，适合高级用法
         return response.choices[0].message.content  # 默认解析出content
+
+    async def achat(self, messages: List[Union[Dict, BaseMessage]], stream: bool = False, return_raw: bool = False,
+                    **kwargs):
+        """
+        与 LLM 进行异步对话
+        """
+        if messages and isinstance(messages[0], BaseMessage):
+            messages = self.convert_messages_to_dicts(messages)
+        response = await self.client.achat(model=self.config.model, messages=messages, stream=stream, **kwargs)
+        if return_raw or stream:
+            return response
+        return response.choices[0].message.content

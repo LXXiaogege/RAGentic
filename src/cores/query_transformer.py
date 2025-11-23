@@ -7,7 +7,7 @@
 """
 from typing import List, Dict, Optional
 from src.models.llm import LLMWrapper
-from src.configs.retrieve_config import RewriteConfig
+from src.configs.retrieve_config import RewriteConfig, SearchConfig
 
 from src.cores.message_builder import MessageBuilder
 from src.models.embedding import TextEmbedding
@@ -142,31 +142,14 @@ class QueryTransformer:
             self.logger.exception(f"HyDE 向量生成失败: {str(e)}")
             return None
 
-    def hyde_search(self, query: str, k: int = 3) -> List[Dict]:
+    def hyde_search(self, query: str, config: SearchConfig) -> List[Dict]:
         """
         使用 HyDE 向量进行文档检索
-        
-        Args:
-            query: 原始查询
-            k: 返回结果数量
         """
-        self.logger.info(f"开始 HyDE 搜索，k={k}")
-        self.logger.debug(f"查询: {query}")
 
         try:
-            # 生成 HyDE 向量
             vector = self.generate_hyde_vector(query)
-            self.logger.debug("已生成 HyDE 向量")
-
-            # 执行搜索
-            docs = self.db_connection_manager.search(
-                query=vector,
-                k=k,
-                use_sparse=False,
-                use_reranker=False,
-                use_contextualize_embedding=False
-            )
-            self.logger.info(f"搜索完成，找到 {len(docs)} 个文档")
+            docs = self.db_connection_manager.search(query=vector,search_config= config)
             return docs
 
         except Exception as e:
