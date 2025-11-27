@@ -5,6 +5,8 @@
 @File ：data_service.py.py
 @IDE ：PyCharm
 """
+import asyncio
+
 from pymilvus.model.reranker import CrossEncoderRerankFunction
 
 from src.configs.retrieve_config import MilvusConfig, SearchConfig
@@ -22,7 +24,6 @@ import json
 from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
 from pymilvus import AnnSearchRequest, RRFRanker
 from pymilvus.model.sparse import BM25EmbeddingFunction
-from pydantic import BaseModel
 
 logger = setup_logger(__name__)
 
@@ -35,8 +36,6 @@ def truncate_by_bytes(text: str, max_bytes: int = 1024, encoding: str = 'utf-8')
     truncated = encoded[:max_bytes]
     # 防止截断到一半的字符，decode 时加 errors='ignore'
     return truncated.decode(encoding, errors='ignore')
-
-
 
 
 class MilvusDataService:
@@ -89,10 +88,10 @@ class MilvusDataService:
     def _prepare_bm25_vector(self, text: str):
         """
         为单个文本生成 BM25 稀疏向量，返回 Milvus 兼容的格式（形状为 (1, n) 的稀疏矩阵）
-        
+
         Args:
             text: 输入文本
-            
+
         Returns:
             形状为 (1, n) 的稀疏矩阵，可以直接用于 Milvus 的 bm25_vec 字段
         """
@@ -102,10 +101,10 @@ class MilvusDataService:
     def _prepare_bm25_vectors(self, texts: List[str]):
         """
         为多个文本生成 BM25 稀疏向量列表，返回 Milvus 兼容的格式
-        
+
         Args:
             texts: 输入文本列表
-            
+
         Returns:
             稀疏向量列表，每个元素是形状为 (1, n) 的稀疏矩阵
         """
@@ -151,10 +150,8 @@ class MilvusDataService:
         # 备份原始数据
         backup_data = self._backup_records(update_ids)
         try:
-            self.logger.info(f"开始更新 {len(records)} 条文档，再删除旧数据")
             self.client.delete(collection_name=self.milvus_config.collection_name, ids=update_ids)
             self.client.insert(collection_name=self.milvus_config.collection_name, data=records)
-            self.logger.info(f"成功更新 {len(records)} 条已有文档")
         except Exception as update_error:
             self.logger.error(f"更新文档失败，尝试恢复旧数据: {update_error}")
             if backup_data:
@@ -165,11 +162,11 @@ class MilvusDataService:
                     self.logger.critical(f"回滚失败，需要人工检查: {rollback_error}")
             raise
 
-    def retrieve(self, query: Union[str, List[float], np.ndarray], config: SearchConfig):
+    async def aretrieve(self, query: Union[str, List[float], np.ndarray], config: SearchConfig):
         """文档召回"""
         # 获取稠密向量
         if isinstance(query, str):
-            dense_vec = self.embeddings.get_embedding(query)[0]
+            dense_vec = (await self.embeddings.aget_embedding(query))[0]
         elif isinstance(query, (list, np.ndarray)):
             dense_vec = np.array(query).flatten()
         else:
@@ -182,54 +179,46 @@ class MilvusDataService:
             self.logger.debug("生成查询的稀疏向量...")
             sparse_vec = self.bm25_func.encode_queries([query])
 
-        # 稠密召回
-        req_list = []
-        dense_search_param = AnnSearchRequest(
-            data=[dense_vec],
-            anns_field="dense_vec",
-            param={"metric_type": "COSINE"},
-            limit=config.top_k * config.search_multiplier,
-        )
-        req_list.append(dense_search_param)
-
-        # 稀疏召回（可选）
-        if config.use_sparse and sparse_vec is not None:
-            sparse_search_param = AnnSearchRequest(
-                data=[sparse_vec],
-                anns_field="bm25_vec",
-                param={"metric_type": "IP"},
-                limit=config.top_k * config.search_multiplier,
-            )
-            req_list.append(sparse_search_param)
-
-        # 执行混合搜索（多路 + RRF 排序）
-        if len(req_list) > 1:
-            self.logger.debug("使用混合搜索（稠密+稀疏）")
-            docs = self.client.hybrid_search(
-                self.milvus_config.collection_name,
-                req_list,
-                RRFRanker(),  # Reciprocal Rank Fusion，轻量级排序器
-                config.top_k,
-                output_fields=[
-                    "id",
-                    "text",
-                    "metadata"
-                ],
-            )
-        else:
-            self.logger.debug("使用单一稠密搜索")
-            docs = self.client.search(
-                self.milvus_config.collection_name,
+        def run_milvus_search():
+            req_list = []
+            dense_search_param = AnnSearchRequest(
                 data=[dense_vec],
                 anns_field="dense_vec",
-                limit=config.top_k,
-                output_fields=["id", "text", "metadata"],
+                param={"metric_type": "COSINE"},
+                limit=config.top_k * config.search_multiplier,
             )
+            req_list.append(dense_search_param)
+            if config.use_sparse and sparse_vec is not None:
+                sparse_search_param = AnnSearchRequest(
+                    data=[sparse_vec],
+                    anns_field="bm25_vec",
+                    param={"metric_type": "IP"},
+                    limit=config.top_k * config.search_multiplier,
+                )
+                req_list.append(sparse_search_param)
+            # 执行混合搜索
+            if len(req_list) > 1:
+                return self.client.hybrid_search(
+                    self.milvus_config.collection_name,
+                    req_list,
+                    RRFRanker(),
+                    config.top_k,
+                    output_fields=["id", "text", "metadata"],
+                )
+            else:
+                return self.client.search(
+                    self.milvus_config.collection_name,
+                    data=[dense_vec],
+                    anns_field="dense_vec",
+                    limit=config.top_k,
+                    output_fields=["id", "text", "metadata"],
+                )
+
+        docs = await asyncio.to_thread(run_milvus_search)
         return docs
 
     def rerank(self, query: str, docs, config: SearchConfig):
         """重排序"""
-        self.logger.info("开始重排序...")
         rerank_texts = []
         for hit in docs[0]:
             if config.use_contextualize_embedding:
@@ -246,20 +235,26 @@ class MilvusDataService:
             reverse=True
         )
         docs[0] = [item[0] for item in reranked[:config.top_k]]
-        self.logger.info("重排序完成")
         return docs
 
-    @observe(name="MilvusDB.search", as_type="retriever")
-    def search(self, query: Union[str, List[float], np.array], config: SearchConfig) -> List[Dict[str, Any]]:
+    async def arerank(self, query: str, docs, config: SearchConfig):
+        """异步重排序 (通过线程池)"""
+        self.logger.info("开始异步重排序...")
+        reranked_docs = await asyncio.to_thread(self.rerank, query, docs, config)
+        self.logger.info("异步重排序完成")
+        return reranked_docs
+
+    @observe(name="MilvusDB.asearch", as_type="retriever")
+    async def asearch(self, query: Union[str, List[float], np.array], config: SearchConfig) -> List[Dict[str, Any]]:
         """
         多路召回 + 多策略重排序：dense + sparse + RRFRanker + CrossEncoder rerank
         """
         self.logger.info("开始搜索...")
 
-        docs = self.retrieve(query, config)
+        docs = await self.aretrieve(query, config)
 
         if config.use_reranker:
-            docs = self.rerank(query, docs, config)
+            docs = await self.arerank(query, docs, config)
         else:
             docs = docs[:config.top_k]
 
@@ -294,57 +289,61 @@ class MilvusDataService:
             self.logger.warning(f"备份记录失败: {e}")
             return []
 
-    def add_documents_from_dir(self, data_dir: str):
+    async def aadd_documents_from_dir(self, data_dir: str):
         """从目录中批量添加或更新文档向量"""
-        self.logger.info(f"开始从目录 {data_dir} 添加文档...")
-        try:
-            self.logger.info("开始处理文件...")
+
+        # 1. 文件处理和记录准备 (CPU密集型，但涉及文件I/O，最好线程化)
+        def prepare_data():
             documents = self.data_processor.batch_process_files(data_dir)
             texts, meta_datas, ids = self.prepare_records(documents)
+            return texts, meta_datas, ids
 
-            # 批量查询已有 ID
-            existing_ids = set()
-            if ids:
-                self.logger.info("查询已存在的文档 ID...")
-                quoted_ids = [f'"{id_}"' for id_ in ids]
-                filter_expr = f"id in [{', '.join(quoted_ids)}]"
-                results = self.client.query(
-                    collection_name=self.milvus_config.collection_name,
-                    filter=filter_expr,
-                    output_fields=["id"]
-                )
-                existing_ids = {r['id'] for r in results}
-                self.logger.info(f"找到 {len(existing_ids)} 条已存在的文档")
+        texts, meta_datas, ids = await asyncio.to_thread(prepare_data)
 
-            # 生成向量
-            self.logger.info("开始生成文档向量...")
-            dense_vectors = self.embeddings.get_embedding(texts)
-            insert_data, update_data = [], []
-            self.load_bm25_model(texts)
-            # 使用辅助方法生成稀疏向量，确保格式一致
-            bm25_vectors = self._prepare_bm25_vectors(texts)
-            self.logger.info("向量生成完成")
+        # 2. 批量查询已有 ID (Milvus I/O 阻塞)
+        async def query_existing_ids(ids_list):
+            if not ids_list:
+                return set()
+            quoted_ids = [f'"{id_}"' for id_ in ids_list]
+            filter_expr = f"id in [{', '.join(quoted_ids)}]"
 
-            self.logger.info("准备插入和更新数据...")
-            for id_, text, meta_data, dense_vector, bm25_vector in zip(ids, texts, meta_datas, dense_vectors,
-                                                                       bm25_vectors):
-                record = {
-                    "id": id_,
-                    "text": truncate_by_bytes(text, self.milvus_config.max_text_length),
-                    "metadata": str(meta_data),
-                    "dense_vec": dense_vector,
-                    "bm25_vec": bm25_vector
-                }
-                if id_ in existing_ids:
-                    update_data.append(record)
-                else:
-                    insert_data.append(record)
+            # 使用 asyncio.to_thread 封装同步 Milvus 查询
+            results = await asyncio.to_thread(
+                self.client.query,
+                collection_name=self.milvus_config.collection_name,
+                filter=filter_expr,
+                output_fields=["id"]
+            )
+            return {r['id'] for r in results}
 
-            # 插入和更新
+        existing_ids = await query_existing_ids(ids)
+
+        # 3. 异步生成稠密向量
+        dense_vectors = await self.embeddings.aget_embedding(texts)
+        # 4. 稀疏向量生成 (CPU密集型，可同步/线程化)
+        self.load_bm25_model(texts)
+        bm25_vectors = await asyncio.to_thread(self._prepare_bm25_vectors, texts)
+
+        # 5. 准备插入/更新数据 (CPU密集型，可同步)
+        insert_data, update_data = [], []
+        for id_, text, meta_data, dense_vector, bm25_vector in zip(ids, texts, meta_datas, dense_vectors, bm25_vectors):
+            record = {
+                "id": id_,
+                "text": truncate_by_bytes(text, self.milvus_config.max_text_length),
+                "metadata": str(meta_data),
+                "dense_vec": dense_vector,
+                "bm25_vec": bm25_vector
+            }
+            if id_ in existing_ids:
+                update_data.append(record)
+            else:
+                insert_data.append(record)
+
+        # 6. 异步插入和更新 (Milvus I/O 阻塞)
+        def run_insert_update():
             self.insert_records(insert_data)
             self.update_records(update_data)
-            self.logger.info("文档添加完成")
 
-        except Exception as e:
-            self.logger.exception(f"文档向量插入/更新失败：{e}")
-            raise
+        await asyncio.to_thread(run_insert_update)
+
+        self.logger.info("文档添加完成 (异步)")

@@ -295,7 +295,7 @@ class LangGraphQAPipeline:
     def _check_call_tools(self, state: QAState) -> QAState:
         return state
 
-    def _retrieve_knowledge(self, state: QAState) -> QAState:
+    async def _retrieve_knowledge(self, state: QAState) -> QAState:
         """知识库检索"""
         try:
             if not self.config.retrieve.use_kb:
@@ -307,14 +307,9 @@ class LangGraphQAPipeline:
 
             # 选择检索方法
             if self.config.retrieve.use_rewrite and self.config.retrieve.rewrite_mode == "hyde":
-                results = self.query_transformer.hyde_search(query, self.config.retrieve.top_k)
+                results = await self.query_transformer.hyde_search(query, self.config.retrieve.search_config)
             else:
-                results = self.db_connection_manager.search(
-                    query=query,
-                    k=self.config.retrieve.top_k,
-                    use_sparse=self.config.retrieve.use_sparse,
-                    use_reranker=self.config.retrieve.use_reranker,
-                )
+                results = await self.db_connection_manager.asearch(query, self.config.retrieve.search_config)
 
             # 处理检索结果
             if not results:

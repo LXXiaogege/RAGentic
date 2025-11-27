@@ -202,16 +202,17 @@ class MilvusConnectionManager:
         """按条件删除"""
         self.data_service.delete_by_filter(collection_name, filter_condition)
 
-    def add_documents_from_dir(self, data_dir: str):
+    async def add_documents_from_dir(self, data_dir: str):
         """从目录中批量添加或更新文档向量"""
         # 确保集合已创建
         self.build_collection()
         # 添加文档
-        self.data_service.add_documents_from_dir(data_dir)
+        await self.data_service.aadd_documents_from_dir(data_dir)
 
-    def search(self, query: Union[str, List[float], np.array], search_config: SearchConfig) -> List[Dict[str, Any]]:
+    async def asearch(self, query: Union[str, List[float], np.array], search_config: SearchConfig) -> List[
+        Dict[str, Any]]:
         """
         搜索向量
         """
         self.search_config = search_config if search_config else self.search_config
-        return self.data_service.search(query, self.search_config)
+        return await self.data_service.asearch(query, self.search_config)

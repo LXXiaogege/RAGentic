@@ -9,6 +9,7 @@ from src.configs.config import AppConfig
 from langfuse import get_client
 import os
 from src.cores.pipeline import QAPipeline
+import asyncio
 
 config = AppConfig()
 os.environ["LANGFUSE_SECRET_KEY"] = config.langfuse.secret_key
@@ -21,8 +22,16 @@ os.environ["OPENAI_API_KEY"] = config.llm.api_key
 os.environ["OPENAI_API_BASE"] = config.llm.base_url
 
 langfuse_client = get_client()
+config.retrieve.use_kb = True
 pipeline = QAPipeline(config)
 
-# pipeline.build_knowledge_base("/Users/lvxin/PycharmProjects/RAGentic/data/knowledge_db/pumpkin_book")
 
-print(pipeline.ask("你好，你是谁"))
+
+async def main():
+    await pipeline.build_knowledge_base("/Users/lvxin/PycharmProjects/RAGentic/data/knowledge_db/pumpkin_book")
+    # result = await pipeline.ask("大模型是什么", )
+    # print(result)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

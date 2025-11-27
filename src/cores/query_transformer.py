@@ -142,14 +142,14 @@ class QueryTransformer:
             self.logger.exception(f"HyDE 向量生成失败: {str(e)}")
             return None
 
-    def hyde_search(self, query: str, config: SearchConfig) -> List[Dict]:
+    async def hyde_search(self, query: str, config: SearchConfig) -> List[Dict]:
         """
         使用 HyDE 向量进行文档检索
         """
 
         try:
             vector = self.generate_hyde_vector(query)
-            docs = self.db_connection_manager.search(query=vector,search_config= config)
+            docs = await self.db_connection_manager.asearch(query=vector, search_config=config)
             return docs
 
         except Exception as e:

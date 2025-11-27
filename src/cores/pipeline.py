@@ -79,9 +79,9 @@ class QAPipeline:
         self.prompt_manager = PromptManager(self.langfuse_client)
 
     @observe(name="QAPipline.build_knowledge_base")
-    def build_knowledge_base(self, data_dir: str):
+    async def build_knowledge_base(self, data_dir: str):
         self.logger.info(f"开始构建知识库，数据目录: {data_dir}")
-        self.db_connection_manager.add_documents_from_dir(data_dir)
+        await self.db_connection_manager.add_documents_from_dir(data_dir)
         self.logger.info("知识库构建完成")
 
     @observe(name="QAPipeline._build_messages")
@@ -102,7 +102,7 @@ class QAPipeline:
         )
         return messages, context
 
-    def _retrieve_kb_context(self, query: str) -> tuple[str, str]:
+    async def _retrieve_kb_context(self, query: str) -> tuple[str, str]:
         """
         执行知识库检索，返回格式化的上下文和原始检索内容。
         如果配置未开启知识库，返回空元组。
@@ -117,9 +117,9 @@ class QAPipeline:
         use_hyde = retrieve_config.use_rewrite and retrieve_config.rewrite_mode == 'hyde'
 
         if use_hyde:
-            results = self.query_transformer.hyde_search(query, retrieve_config)
+            results = await self.query_transformer.hyde_search(query, retrieve_config)
         else:
-            results = self.db_connection_manager.search(query=query, search_config=retrieve_config)
+            results = await self.db_connection_manager.asearch(query, retrieve_config)
 
         # 处理检索结果
         if results and results[0]:
@@ -159,7 +159,7 @@ class QAPipeline:
             tool_context_raw = tool_formatted_context.split('\n', 1)[-1]
 
         # --- Step 2: 知识库检索 ---
-        kb_formatted_context, kb_context_raw = self._retrieve_kb_context(query)
+        kb_formatted_context, kb_context_raw = await self._retrieve_kb_context(query)
         if kb_formatted_context:
             context_blocks.append(kb_formatted_context)
 
@@ -228,7 +228,7 @@ class QAPipeline:
             self.logger.info("开始流式调用 LLM")
             stream = await self.llm_caller.achat(messages, stream=True)
             answer = ""
-            for chunk in stream:
+            async for chunk in stream:
                 delta = getattr(chunk.choices[0].delta, 'content', None)
                 if delta:
                     answer += delta
