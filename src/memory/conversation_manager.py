@@ -32,13 +32,11 @@ class ConversationMemory:
     def get_history(self) -> str:
         """格式化返回文本历史"""
         if not self.memory:
-            self.logger.debug("对话历史为空")
             return ""
         history = []
         for i, conv in enumerate(self.memory):
             history.append(f"Q{i + 1}: {conv['user']}")
             history.append(f"A{i + 1}: {conv['assistant']}")
-        self.logger.debug(f"获取对话历史，共 {len(self.memory)} 轮对话")
         return "\n".join(history)
 
     def get_messages(self) -> List[Dict[str, str]]:

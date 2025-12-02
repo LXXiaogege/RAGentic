@@ -118,7 +118,7 @@ class LangGraphQAPipeline:
 
         # 查询转换器
         self.query_transformer = QueryTransformer(
-            self.llm_caller, self.message_builder, self.embeddings, self.db_connection_manager, self.config.rewrite)
+            self.llm_caller, self.message_builder, self.embeddings, self.db_connection_manager)
 
         # MCP客户端
         self.mcp_client = MCPClient(self.llm_caller)

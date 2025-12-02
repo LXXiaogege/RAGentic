@@ -190,7 +190,8 @@ class QAEvaluator:
                             {"role": "user", "content": prompt}
                         ],
                         stream=False,
-                        return_raw=False
+                        return_raw=False,
+                        extra_body={"chat_template_kwargs": {"enable_thinking": False}}
                     ).strip()
                     self.logger.debug(f"GPT 评估结果: {judge[:100]}...")
                 except Exception as e:

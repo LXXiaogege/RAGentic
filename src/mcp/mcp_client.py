@@ -114,7 +114,8 @@ class MCPClient:
                 messages=messages,
                 return_raw=True,
                 tools=available_tools,
-                tool_choice='auto'
+                tool_choice='auto',
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}}
             )
             logger.debug("Received response from LLM")
         except Exception as e:

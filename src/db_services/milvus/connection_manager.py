@@ -6,7 +6,10 @@
 @IDE ：PyCharm
 """
 from pymilvus import MilvusClient
-from src.configs.retrieve_config import MilvusConfig, SearchConfig
+
+from src.configs.model_config import RerankConfig, BM25Config
+from src.configs.retrieve_config import SearchConfig
+from src.configs.database_config import MilvusConfig
 from src.db_services.milvus.database_manager import MilvusDBManager
 from src.db_services.milvus.collection_manager import MilvusCollectionManager
 from src.db_services.milvus.data_service import MilvusDataService
@@ -22,7 +25,8 @@ class MilvusConnectionManager:
     统一的 Milvus 数据库入口类
     """
 
-    def __init__(self, embeddings, text_splitter, milvus_config: MilvusConfig, search_config: SearchConfig):
+    def __init__(self, embeddings, text_splitter, milvus_config: MilvusConfig, search_config: SearchConfig,
+                 rerank_config: RerankConfig, bm25_config: BM25Config):
         """
         初始化 Milvus 数据库
 
@@ -33,6 +37,8 @@ class MilvusConnectionManager:
         """
         self.logger = logger
         self.milvus_config = milvus_config
+        self.rerank_config = rerank_config
+        self.bm25_config = bm25_config
         self.search_config = search_config
         self.embeddings = embeddings
         self.text_splitter = text_splitter
@@ -74,6 +80,8 @@ class MilvusConnectionManager:
             embeddings=self.embeddings,
             text_splitter=self.text_splitter,
             config=self.milvus_config,
+            rerank_config=self.rerank_config,
+            bm25_config=self.bm25_config
         )
 
         # 保持向后兼容的属性
@@ -162,7 +170,7 @@ class MilvusConnectionManager:
                 {
                     "name": "bm25_vec",
                     "dtype": "SPARSE_FLOAT_VECTOR",
-                    "drop_ratio_build": self.milvus_config.bm25_drop_ratio
+                    "drop_ratio_build": self.bm25_config.bm25_drop_ratio
                 },
                 {
                     "name": "text",

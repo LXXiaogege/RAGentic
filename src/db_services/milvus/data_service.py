@@ -9,7 +9,9 @@ import asyncio
 
 from pymilvus.model.reranker import CrossEncoderRerankFunction
 
-from src.configs.retrieve_config import MilvusConfig, SearchConfig
+from src.configs.retrieve_config import SearchConfig
+from src.configs.database_config import MilvusConfig
+from src.configs.model_config import BM25Config, RerankConfig
 from src.configs.logger_config import setup_logger
 from src.data_process.processor import DataProcessor
 from src.utils.utils import get_text_hash
@@ -40,29 +42,31 @@ def truncate_by_bytes(text: str, max_bytes: int = 1024, encoding: str = 'utf-8')
 
 class MilvusDataService:
     def __init__(self, collection_manager: MilvusCollectionManager, embeddings: TextEmbedding, text_splitter,
-                 config: MilvusConfig):
+                 config: MilvusConfig, rerank_config: RerankConfig, bm25_config: BM25Config):
         self.logger = logger
         self.milvus_config = config
+        self.rerank_config = rerank_config
+        self.bm25_config = bm25_config
         self.client = collection_manager.client
         self.embeddings = embeddings
         self.data_processor = DataProcessor(text_splitter)
         self.bm25_func = BM25EmbeddingFunction(
-            analyzer=build_default_analyzer(language=self.milvus_config.bm25_language)
+            analyzer=build_default_analyzer(language=self.bm25_config.bm25_language)
         )
-        self.bm25_model_path = os.path.join(self.milvus_config.bm25_model_dir,
+        self.bm25_model_path = os.path.join(self.bm25_config.bm25_model_dir,
                                             self.milvus_config.collection_name + "_bm25.pkl")
         if self.bm25_model_path and os.path.exists(self.bm25_model_path):
             self.bm25_func.load(self.bm25_model_path)
             self.logger.info(f"已加载 BM25 模型: {self.bm25_model_path}")
 
         self.rerank_function = CrossEncoderRerankFunction(
-            model_name=self.milvus_config.rerank_model_path,
-            device=self.milvus_config.rerank_device
+            model_name=self.rerank_config.rerank_model_path,
+            device=self.rerank_config.rerank_device
         )
 
     def load_bm25_model(self, texts: List[str]):
         self.logger.info("开始加载/训练 BM25 模型...")
-        os.makedirs(self.milvus_config.bm25_model_dir, exist_ok=True)
+        os.makedirs(self.bm25_config.bm25_model_dir, exist_ok=True)
         model_path = self.bm25_model_path
         meta_path = model_path + ".meta.json"
         texts_hash = get_text_hash(''.join(texts[:10]))

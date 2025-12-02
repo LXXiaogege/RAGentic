@@ -7,7 +7,7 @@
 """
 from typing import List, Dict, Optional
 from src.models.llm import LLMWrapper
-from src.configs.retrieve_config import RewriteConfig, SearchConfig
+from src.configs.retrieve_config import SearchConfig
 
 from src.cores.message_builder import MessageBuilder
 from src.models.embedding import TextEmbedding
@@ -20,10 +20,9 @@ logger = setup_logger(__name__)
 
 class QueryTransformer:
     def __init__(self, llm: LLMWrapper, message_builder: MessageBuilder, embeddings: TextEmbedding,
-                 db_connection_manager: MilvusConnectionManager, config: RewriteConfig):
+                 db_connection_manager: MilvusConnectionManager):
         self.logger = logger
         self.logger.info("初始化查询转换器...")
-        self.config = config
         self.llm = llm
         self.message_builder = message_builder
         self.embeddings = embeddings
@@ -91,10 +90,11 @@ class QueryTransformer:
             prompt_template = self.get_templates(mode).format(original_query=query)
             self.logger.debug("已构建提示模板")
 
-            messages = self.message_builder.build(query, system_prompt_template=prompt_template, no_think=True)
+            messages = self.message_builder.build(query, system_prompt_template=prompt_template)
             self.logger.debug("已构建消息")
 
-            rewrite_query = self.llm.chat(messages).strip()
+            rewrite_query = self.llm.chat(messages,
+                                          extra_body={"chat_template_kwargs": {"enable_thinking": False}}).strip()
             self.logger.info(f"查询转换完成，新查询: {rewrite_query[:100]}...")
             return rewrite_query
 
@@ -121,8 +121,8 @@ class QueryTransformer:
 
             for i in range(num_hypo):
                 self.logger.debug(f"生成第 {i + 1}/{num_hypo} 个假设答案")
-                messages = self.message_builder.build(query, system_prompt_template=prompt_template, no_think=True)
-                hypo = self.llm.chat(messages).strip()
+                messages = self.message_builder.build(query, system_prompt_template=prompt_template)
+                hypo = self.llm.chat(messages, extra_body={"chat_template_kwargs": {"enable_thinking": False}}).strip()
                 hypo_docs.append(hypo)
                 self.logger.debug(f"假设答案 {i + 1}: {hypo[:100]}...")
 

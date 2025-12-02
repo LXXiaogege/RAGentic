@@ -6,13 +6,6 @@
 @IDE ：PyCharm
 """
 
-# -*- coding: utf-8 -*-
-"""
-@Time    : 2025/1/16
-@Author  : 吕鑫 (Optimized UI by Gemini)
-@File    : web_app.py
-@Desc    : 基于 Gradio 的 RAG 问答系统 Web 界面 - 现代化 UI 重构版
-"""
 import os
 import uuid
 import gradio as gr
@@ -41,12 +34,21 @@ except Exception as e:
     logger.warning(f"Langfuse 客户端初始化失败: {e}")
     langfuse_client = None
 
-pipeline = QAPipeline(config, langfuse_client)
-logger.info("QAPipeline 初始化完成")
+pipline = None
 
 
-async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, no_think,
-             session_id, history):
+async def init_rag_client():
+    global pipeline
+    pipeline = QAPipeline(config, langfuse_client)
+    await pipeline.init_components()
+    logger.info("QAPipeline 初始化完成")
+
+
+asyncio.run(init_rag_client())
+
+
+async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think,
+                   session_id, history):
     """同步问答接口"""
     if not query or not query.strip():
         return "", history
@@ -60,13 +62,17 @@ async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_r
         use_memory=use_memory,
         use_tool=use_tool,
         top_k=top_k,
-        no_think=no_think,
+        extra_body={
+            "chat_template_kwargs": {
+                "enable_thinking": enable_think
+            }
+        },
         session_id=session_id
     )
     try:
         result = await pipeline.ask(query=query, config=search_config)
         if "error" in result:
-            answer = f"❌ 错误: {result['error']}"
+            answer = f"错误: {result['error']}"
         else:
             answer = result["answer"]
             if result.get("context"):
@@ -77,12 +83,12 @@ async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_r
         return "", history
     except Exception as e:
         logger.exception("问答处理异常")
-        history.append([query, f"❌ 错误: {str(e)}"])
+        history.append([query, f"错误: {str(e)}"])
         return "", history
 
 
-async def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, no_think, session_id,
-                history):
+async def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think, session_id,
+                      history):
     """流式问答接口"""
     if not query or not query.strip():
         yield history
@@ -97,7 +103,11 @@ async def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, us
             use_memory=use_memory,
             use_tool=use_tool,
             top_k=top_k,
-            no_think=no_think,
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": enable_think
+                }
+            },
             session_id=session_id
         )
         answer = ""
@@ -121,7 +131,7 @@ async def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, us
 
 
 def clear_memory_action():
-    pipeline.clear_memory()
+    pipeline.clear_conversation()
     return [], ""
 
 
@@ -341,7 +351,7 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
                     use_stream_cb = gr.Checkbox(label="流式输出", value=False)
                     use_sparse_cb = gr.Checkbox(label="混合检索", value=False)
                     use_reranker_cb = gr.Checkbox(label="重排序", value=False)
-                    no_think_cb = gr.Checkbox(label="快速模式 (禁用思考)", value=True)
+                    use_think_cb = gr.Checkbox(label="深度思考", value=False)
                     # 隐藏的 Session ID 显示，方便调试但平时不占地
                     session_id_display = gr.Textbox(label="当前会话 ID", interactive=False, text_align="right", lines=1)
 
@@ -379,7 +389,7 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
     # ================= 事件绑定 =================
 
     # 包装响应函数以处理 State
-    async def respond_wrapper(message, history, kb, tool, memory, stream, k, sparse, rerank, no_think, sess_id):
+    async def respond_wrapper(message, history, kb, tool, memory, stream, k, sparse, rerank, enable_think, sess_id):
         if not message.strip():
             yield "", history, sess_id
             return
@@ -389,12 +399,12 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
 
         if stream:
             async for updated_history in chat_stream(
-                    message, kb, tool, memory, k, sparse, rerank, no_think, current_sess_id, history
+                    message, kb, tool, memory, k, sparse, rerank, enable_think, current_sess_id, history
             ):
                 yield "", updated_history, current_sess_id
         else:
             _, updated_history = await chat_ask(
-                message, kb, tool, memory, k, sparse, rerank, no_think, current_sess_id, history
+                message, kb, tool, memory, k, sparse, rerank, enable_think, current_sess_id, history
             )
             yield "", updated_history, current_sess_id
 
@@ -409,7 +419,7 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
     msg.submit(
         respond_wrapper,
         inputs=[msg, chatbot, use_kb, use_tool, use_memory_cb, use_stream_cb,
-                top_k, use_sparse_cb, use_reranker_cb, no_think_cb, session_id_state],
+                top_k, use_sparse_cb, use_reranker_cb, use_think_cb, session_id_state],
         outputs=[msg, chatbot, session_id_state]
     ).then(
         lambda s: s, inputs=[session_id_state], outputs=[session_id_display]  # 更新显示的 ID
@@ -419,7 +429,7 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
     submit_btn.click(
         respond_wrapper,
         inputs=[msg, chatbot, use_kb, use_tool, use_memory_cb, use_stream_cb,
-                top_k, use_sparse_cb, use_reranker_cb, no_think_cb, session_id_state],
+                top_k, use_sparse_cb, use_reranker_cb, use_think_cb, session_id_state],
         outputs=[msg, chatbot, session_id_state]
     ).then(
         lambda s: s, inputs=[session_id_state], outputs=[session_id_display]
