@@ -11,9 +11,7 @@ from src.models.embedding import TextEmbedding
 from src.configs.config import AppConfig
 
 config = AppConfig()
-embedding = TextEmbedding(config.embedding)
-
-print(embedding.get_embedding(["hello world", "hello world"]))
+embedding = TextEmbedding(config)
 
 
 async def main():

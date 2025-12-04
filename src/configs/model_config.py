@@ -25,11 +25,7 @@ class EmbeddingConfig(BaseModel):
     base_url: str = Field("", description="Embedding API Base URL,默认从.env中加载")
     api_key: str = Field("", description="Embedding API Key,默认从.env中加载")
     model: str = Field("text-embedding-v3", description="Embedding 模型名称")
-    cache_path: str = Field(
-        "../data/embeddings/embedding_cache.json",
-        description="Embedding 本地缓存路径"
-    )
-
+    use_cache: bool = Field(True, description="是否使用缓存")
 
 class RerankConfig(BaseModel):
     rerank_model_path: str = "/Users/lvxin/datasets/models/bge-reranker-base"

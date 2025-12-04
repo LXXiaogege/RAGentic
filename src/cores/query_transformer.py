@@ -102,7 +102,7 @@ class QueryTransformer:
             self.logger.exception(f"查询转换失败: {str(e)}")
             raise
 
-    def generate_hyde_vector(self, query: str, num_hypo: int = 3) -> Optional[List[float]]:
+    async def generate_hyde_vector(self, query: str, num_hypo: int = 3) -> Optional[List[float]]:
         """
         生成 HyDE 融合向量：原始查询向量 + 多个假设答案向量
         
@@ -128,8 +128,9 @@ class QueryTransformer:
 
             # 生成向量
             self.logger.info("开始生成向量...")
-            hypo_vectors = self.embeddings.get_embedding(hypo_docs)
-            query_vector = self.embeddings.get_embedding(query)[0]
+            hypo_vectors = await self.embeddings.aget_embedding(hypo_docs)
+            query_embeddings_result = await self.embeddings.aget_embedding(query)
+            query_vector = query_embeddings_result[0]
 
             # 融合向量
             combined_vector = [np.mean(np.vstack([*hypo_vectors, query_vector]), axis=0).tolist()]
@@ -148,7 +149,7 @@ class QueryTransformer:
         """
 
         try:
-            vector = self.generate_hyde_vector(query)
+            vector = await self.generate_hyde_vector(query)
             docs = await self.db_connection_manager.asearch(query=vector, search_config=config)
             return docs
 

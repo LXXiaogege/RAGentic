@@ -55,7 +55,7 @@ class QAPipeline:
         self.logger.info("初始化 QAPipeline...")
 
         self.logger.info("初始化文本嵌入模型...")
-        self.embeddings = TextEmbedding(self.config.embedding)
+        self.embeddings = TextEmbedding(self.config)
 
         self.logger.info("初始化 LLM 包装器...")
         self.llm_caller = LLMWrapper(self.config.llm)

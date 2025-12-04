@@ -36,3 +36,9 @@ class Neo4jConfig(BaseModel):
     password: str = Field(default="password", description="Neo4j 密码")
     database: str = Field(default="neo4j", description="Neo4j 数据库名称")
     use_base_entity_label: bool = Field(default=False, description="是否为所有实体节点添加基础标签 __Entity__。")
+
+
+class RedisConfig(BaseModel):
+    redis_url: str = Field(default="redis://localhost:6379", description="Redis URL")
+    redis_password: str = Field(default=None, description="Redis 密码")
+    embeddings_cache_db: int = Field(default=0, description="Redis 数据库索引，用于存储嵌入缓存。")

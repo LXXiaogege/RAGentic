@@ -14,7 +14,7 @@ from src.configs.evaluate_config import EvaluationConfig
 from src.configs.memory_config import Mem0Config
 from src.configs.model_config import LLMConfig, EmbeddingConfig, RerankConfig, BM25Config
 from src.configs.prompt_config import PromptConfig
-from src.configs.database_config import MilvusConfig, Neo4jConfig
+from src.configs.database_config import MilvusConfig, Neo4jConfig, RedisConfig
 from src.configs.retrieve_config import SplitterConfig, MessageBuilderConfig, SearchConfig
 from src.configs.thirdpart_config import LangfuseConfig
 from src.configs.tool_config import ToolsConfig
@@ -42,6 +42,7 @@ class AppConfig(BaseSettings):
     # 数据库配置
     milvus: MilvusConfig = Field(default_factory=MilvusConfig, description="Milvus向量数据库配置")
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig, description="Neo4j图数据库配置")
+    redis: RedisConfig = Field(default_factory=RedisConfig, description="Redis数据库配置")
 
     memory: Mem0Config = Field(default_factory=Mem0Config, description="mem0 配置")
     # 工具和提示词配置
