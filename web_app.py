@@ -8,9 +8,12 @@
 
 import os
 import uuid
+from typing import Optional
+
+
 import gradio as gr
 from langfuse import get_client
-import asyncio
+
 from src.cores.pipeline import QAPipeline
 from src.configs.config import AppConfig
 from src.configs.logger_config import setup_logger
@@ -18,7 +21,7 @@ from src.configs.retrieve_config import SearchConfig
 
 logger = setup_logger(__name__)
 
-# ================= 配置初始化 (保持不变) =================
+# ================= 配置初始化 =================
 config = AppConfig()
 os.environ["LANGFUSE_SECRET_KEY"] = config.langfuse.secret_key
 os.environ["LANGFUSE_PUBLIC_KEY"] = config.langfuse.public_key
@@ -31,24 +34,34 @@ try:
     langfuse_client = get_client()
     logger.info("Langfuse 客户端初始化成功")
 except Exception as e:
-    logger.warning(f"Langfuse 客户端初始化失败: {e}")
+    logger.warning(f"Langfuse 客户端初始化失败：{e}")
     langfuse_client = None
 
-pipline = None
+pipeline: Optional[QAPipeline] = None
 
 
 async def init_rag_client():
+    """懒初始化 RAG Pipeline"""
     global pipeline
-    pipeline = QAPipeline(config, langfuse_client)
-    await pipeline.init_components()
-    logger.info("QAPipeline 初始化完成")
+    if pipeline is None:
+        pipeline = QAPipeline(config, langfuse_client)
+        await pipeline.init_components()
+        logger.info("QAPipeline 初始化完成")
+    return pipeline
 
 
-asyncio.run(init_rag_client())
-
-
-async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think,
-                   session_id, history):
+async def chat_ask(
+    query,
+    use_kb,
+    use_tool,
+    use_memory,
+    top_k,
+    use_sparse,
+    use_reranker,
+    enable_think,
+    session_id,
+    history,
+):
     """同步问答接口"""
     if not query or not query.strip():
         return "", history
@@ -62,12 +75,8 @@ async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_r
         use_memory=use_memory,
         use_tool=use_tool,
         top_k=top_k,
-        extra_body={
-            "chat_template_kwargs": {
-                "enable_thinking": enable_think
-            }
-        },
-        session_id=session_id
+        extra_body={"chat_template_kwargs": {"enable_thinking": enable_think}},
+        session_id=session_id,
     )
     try:
         result = await pipeline.ask(query=query, config=search_config)
@@ -76,7 +85,11 @@ async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_r
         else:
             answer = result["answer"]
             if result.get("context"):
-                context_preview = result["context"][:200] + "..." if len(result["context"]) > 200 else result["context"]
+                context_preview = (
+                    result["context"][:200] + "..."
+                    if len(result["context"]) > 200
+                    else result["context"]
+                )
                 # 使用 Details 标签折叠上下文，界面更干净
                 answer = f"{answer}\n\n<details><summary>📚 检索参考源 (点击展开)</summary>\n\n{context_preview}\n</details>"
         history.append([query, answer])
@@ -87,8 +100,18 @@ async def chat_ask(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_r
         return "", history
 
 
-async def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think, session_id,
-                      history):
+async def chat_stream(
+    query,
+    use_kb,
+    use_tool,
+    use_memory,
+    top_k,
+    use_sparse,
+    use_reranker,
+    enable_think,
+    session_id,
+    history,
+):
     """流式问答接口"""
     if not query or not query.strip():
         yield history
@@ -103,12 +126,8 @@ async def chat_stream(query, use_kb, use_tool, use_memory, top_k, use_sparse, us
             use_memory=use_memory,
             use_tool=use_tool,
             top_k=top_k,
-            extra_body={
-                "chat_template_kwargs": {
-                    "enable_thinking": enable_think
-                }
-            },
-            session_id=session_id
+            extra_body={"chat_template_kwargs": {"enable_thinking": enable_think}},
+            session_id=session_id,
         )
         answer = ""
         history.append([query, ""])
@@ -319,7 +338,7 @@ theme = gr.themes.Soft(
     secondary_hue="slate",
     neutral_hue="slate",
     text_size="lg",
-    radius_size="lg"
+    radius_size="lg",
 )
 with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
     session_id_state = gr.State(value="")
@@ -341,9 +360,15 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
                 # 核心功能开关
                 with gr.Group():
                     gr.Markdown("### ✨ 核心能力", elem_id="core-label")
-                    use_kb = gr.Checkbox(label="📚 检索知识库", value=False, info="基于本地文档回答")
-                    use_tool = gr.Checkbox(label="🌐 联网/工具", value=False, info="调用搜索或外部API")
-                    use_memory_cb = gr.Checkbox(label="💬 上下文记忆", value=False, info="记住多轮对话内容")
+                    use_kb = gr.Checkbox(
+                        label="📚 检索知识库", value=False, info="基于本地文档回答"
+                    )
+                    use_tool = gr.Checkbox(
+                        label="🌐 联网/工具", value=False, info="调用搜索或外部API"
+                    )
+                    use_memory_cb = gr.Checkbox(
+                        label="💬 上下文记忆", value=False, info="记住多轮对话内容"
+                    )
 
                 # 高级设置 (折叠)
                 with gr.Accordion("高级参数设置", open=False):
@@ -353,7 +378,12 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
                     use_reranker_cb = gr.Checkbox(label="重排序", value=False)
                     use_think_cb = gr.Checkbox(label="深度思考", value=False)
                     # 隐藏的 Session ID 显示，方便调试但平时不占地
-                    session_id_display = gr.Textbox(label="当前会话 ID", interactive=False, text_align="right", lines=1)
+                    session_id_display = gr.Textbox(
+                        label="当前会话 ID",
+                        interactive=False,
+                        text_align="right",
+                        lines=1,
+                    )
 
                 # 底部操作区
                 gr.Markdown("### 🗑️ 会话管理")
@@ -366,11 +396,13 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
             chatbot = gr.Chatbot(
                 elem_id="chatbot",
                 show_label=False,
-                avatar_images=("https://api.dicebear.com/7.x/notionists/svg?seed=User",
-                               "https://api.dicebear.com/7.x/bottts/svg?seed=RAGBot"),
+                avatar_images=(
+                    "https://api.dicebear.com/7.x/notionists/svg?seed=User",
+                    "https://api.dicebear.com/7.x/bottts/svg?seed=RAGBot",
+                ),
                 bubble_full_width=False,
                 render_markdown=True,
-                show_copy_button=True
+                show_copy_button=True,
             )
 
             with gr.Row(elem_classes="input-area"):
@@ -381,15 +413,26 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
                     show_label=False,
                     container=False,
                     scale=8,
-                    autofocus=True
+                    autofocus=True,
                 )
                 submit_btn = gr.Button("发送", elem_id="send-btn", scale=1)
-
 
     # ================= 事件绑定 =================
 
     # 包装响应函数以处理 State
-    async def respond_wrapper(message, history, kb, tool, memory, stream, k, sparse, rerank, enable_think, sess_id):
+    async def respond_wrapper(
+        message,
+        history,
+        kb,
+        tool,
+        memory,
+        stream,
+        k,
+        sparse,
+        rerank,
+        enable_think,
+        sess_id,
+    ):
         if not message.strip():
             yield "", history, sess_id
             return
@@ -399,52 +442,86 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
 
         if stream:
             async for updated_history in chat_stream(
-                    message, kb, tool, memory, k, sparse, rerank, enable_think, current_sess_id, history
+                message,
+                kb,
+                tool,
+                memory,
+                k,
+                sparse,
+                rerank,
+                enable_think,
+                current_sess_id,
+                history,
             ):
                 yield "", updated_history, current_sess_id
         else:
             _, updated_history = await chat_ask(
-                message, kb, tool, memory, k, sparse, rerank, enable_think, current_sess_id, history
+                message,
+                kb,
+                tool,
+                memory,
+                k,
+                sparse,
+                rerank,
+                enable_think,
+                current_sess_id,
+                history,
             )
             yield "", updated_history, current_sess_id
-
 
     # 包装重置函数
     def reset_wrapper():
         new_sid = str(uuid.uuid4())
         return [], "", new_sid, new_sid
 
-
     # 绑定 Enter 发送
     msg.submit(
         respond_wrapper,
-        inputs=[msg, chatbot, use_kb, use_tool, use_memory_cb, use_stream_cb,
-                top_k, use_sparse_cb, use_reranker_cb, use_think_cb, session_id_state],
-        outputs=[msg, chatbot, session_id_state]
+        inputs=[
+            msg,
+            chatbot,
+            use_kb,
+            use_tool,
+            use_memory_cb,
+            use_stream_cb,
+            top_k,
+            use_sparse_cb,
+            use_reranker_cb,
+            use_think_cb,
+            session_id_state,
+        ],
+        outputs=[msg, chatbot, session_id_state],
     ).then(
-        lambda s: s, inputs=[session_id_state], outputs=[session_id_display]  # 更新显示的 ID
+        lambda s: s,
+        inputs=[session_id_state],
+        outputs=[session_id_display],  # 更新显示的 ID
     )
 
     # 绑定 按钮 发送
     submit_btn.click(
         respond_wrapper,
-        inputs=[msg, chatbot, use_kb, use_tool, use_memory_cb, use_stream_cb,
-                top_k, use_sparse_cb, use_reranker_cb, use_think_cb, session_id_state],
-        outputs=[msg, chatbot, session_id_state]
-    ).then(
-        lambda s: s, inputs=[session_id_state], outputs=[session_id_display]
-    )
+        inputs=[
+            msg,
+            chatbot,
+            use_kb,
+            use_tool,
+            use_memory_cb,
+            use_stream_cb,
+            top_k,
+            use_sparse_cb,
+            use_reranker_cb,
+            use_think_cb,
+            session_id_state,
+        ],
+        outputs=[msg, chatbot, session_id_state],
+    ).then(lambda s: s, inputs=[session_id_state], outputs=[session_id_display])
 
     # 绑定 清除按钮
     clear_btn.click(
-        reset_wrapper,
-        outputs=[chatbot, msg, session_id_state, session_id_display]
+        reset_wrapper, outputs=[chatbot, msg, session_id_state, session_id_display]
     )
 
-    clear_memory_btn.click(
-        clear_memory_action,
-        outputs=[chatbot, msg]
-    )
+    clear_memory_btn.click(clear_memory_action, outputs=[chatbot, msg])
 
 if __name__ == "__main__":
     demo.launch(
@@ -453,5 +530,5 @@ if __name__ == "__main__":
         share=False,
         show_error=True,
         debug=True,
-        prevent_thread_lock=True
+        prevent_thread_lock=True,
     )

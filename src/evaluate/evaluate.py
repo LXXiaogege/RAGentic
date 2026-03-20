@@ -8,7 +8,7 @@
 
 from rouge import Rouge
 from bert_score import score as bert_score_func
-from typing import List, Dict, Optional
+from typing import List, Dict
 import re
 import json
 from src.configs.evaluate_config import EvaluationConfig

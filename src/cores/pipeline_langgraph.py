@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-@Time ： 2025/6/8 10:06
-@Auth ： 吕鑫
-@File ：pipline_langgraph.py
-@IDE ：PyCharm
-"""
+@Time：2025/6/8 10:06
+@Auth：吕鑫
+@File：pipeline_langgraph.py
+@IDE：PyCharm
 
-"""
-基于LangGraph的QA Pipeline重构
-使用状态图来管理复杂的RAG工作流
+基于 LangGraph 的 QA Pipeline 重构
+使用状态图来管理复杂的 RAG 工作流
 """
 
 import asyncio

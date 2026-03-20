@@ -19,7 +19,7 @@ from a2a.types import (
     TaskState,
     TextPart,
 )
-from src.cores.qa_agent import QA_Agent, QAState
+from src.cores.qa_agent import QA_Agent
 from src.configs.config import QAPipelineConfig
 from src.configs.logger_config import setup_logger
 

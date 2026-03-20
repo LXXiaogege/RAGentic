@@ -5,7 +5,6 @@
 @File ：model_config.py
 @IDE ：PyCharm
 """
-from typing import Dict, Any
 
 from pydantic import BaseModel, Field
 

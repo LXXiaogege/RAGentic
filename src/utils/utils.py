@@ -6,7 +6,6 @@
 @IDE ：PyCharm
 """
 import hashlib
-from urllib.parse import urlparse
 from src.configs.logger_config import setup_logger
 
 # 配置日志记录器

@@ -2,12 +2,12 @@
 """
 @Time ： 2025/6/8 10:27
 @Auth ： 吕鑫
-@File ：test_pipline_langgraph.py
+@File ：test_pipeline_langgraph.py
 @IDE ：PyCharm
 """
 
 from src.configs.config import AppConfig
-from src.cores.pipline_langgraph import LangGraphQAPipeline
+from src.cores.pipeline_langgraph import LangGraphQAPipeline
 
 """使用示例"""
 # 假设有配置对象
