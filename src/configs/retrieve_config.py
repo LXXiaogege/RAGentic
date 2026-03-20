@@ -6,8 +6,9 @@
 @IDE ：PyCharm
 """
 
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
 
 
 # 文本切分配置
@@ -18,11 +19,16 @@ class SplitterConfig(BaseModel):
 
 # 检索配置
 class SearchConfig(BaseModel):
-    search_multiplier: int = Field(2, gt=0, description="用于计算初始召回：top_k * multiplier")
+    search_multiplier: int = Field(
+        2, gt=0, description="用于计算初始召回：top_k * multiplier"
+    )
 
     # 查询改写
     use_rewrite: bool = False
-    rewrite_mode: str = Field("rewrite", description="可选: rewrite / step_back / sub_query / hyde（仅知识库查询下有效）")
+    rewrite_mode: str = Field(
+        "rewrite",
+        description="可选: rewrite / step_back / sub_query / hyde（仅知识库查询下有效）",
+    )
     num_hypo: int = Field(3, ge=1, description="HyDE 模式下，生成假设答案数量")
     # 知识库
     use_kb: bool = False
@@ -34,8 +40,7 @@ class SearchConfig(BaseModel):
     retriever_type: str = Field("dense", description="dense / sparse / hybrid")
 
     retriever_weights: List[float] = Field(
-        default_factory=lambda: [0.6, 0.4],
-        description="稠密+稀疏检索融合权重"
+        default_factory=lambda: [0.6, 0.4], description="稠密+稀疏检索融合权重"
     )
 
     top_k: int = Field(3, ge=1)
@@ -50,12 +55,8 @@ class SearchConfig(BaseModel):
     use_tool: bool = Field(False, description="是否在工具模式下执行")
 
     extra_body: Dict[str, Any] = Field(
-        default_factory=lambda: {
-            "chat_template_kwargs": {
-                "enable_thinking": False
-            }
-        },
-        description="LLM 请求额外参数配置，如启用/关闭 thinking 模式"
+        default_factory=lambda: {"chat_template_kwargs": {"enable_thinking": False}},
+        description="LLM 请求额外参数配置，如启用/关闭 thinking 模式",
     )
 
     user_id: Optional[str] = Field(None, min_length=1, max_length=100)
@@ -64,11 +65,10 @@ class SearchConfig(BaseModel):
 
 # Prompt 构建配置
 class MessageBuilderConfig(BaseModel):
+    templates_dir: str = Field("templates", description="Jinja2 模板目录")
     message_builder_model: str = "gpt-3.5-turbo"
     message_max_tokens: int = Field(3500000, ge=1)
 
     message_system_prompt_template: str = "{prefix}{context_hint}"
 
-    message_context_hint_template: str = (
-        "以下是外部知识库资料：\n{context}"
-    )
+    message_context_hint_template: str = "以下是外部知识库资料：\n{context}"

@@ -5,37 +5,50 @@
 @File    : qa_pipeline.py
 @Desc    : 支持配置化、批量问答、自动评估、接口调用的知识库问答模块封装
 """
-from src.models.embedding import TextEmbedding
-from src.db_services.milvus.connection_manager import MilvusConnectionManager
-from src.memory.mem0_manager import Mem0Manager
-from src.memory.conversation_manager import ConversationMemory
-from src.models.llm import LLMWrapper
-from src.evaluate.evaluate import QAEvaluator
-from src.evaluate.rag import RAGASEvaluator
-from src.cores.message_builder import MessageBuilder
-from src.configs.config import AppConfig
-from src.configs.retrieve_config import SearchConfig
-from src.cores.query_transformer import QueryTransformer
-from src.configs.logger_config import setup_logger
-from src.mcp.mcp_client import MCPClient, mcp_main
-from src.utils.prompt import PromptManager
+
+import asyncio
+from typing import AsyncGenerator, Dict, List, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from typing import List, Dict, Optional
-import asyncio
 from langfuse import get_client, observe
+
+from src.configs.config import AppConfig
+from src.configs.logger_config import setup_logger
+from src.configs.retrieve_config import SearchConfig
+from src.cores.message_builder import MessageBuilder
+from src.cores.query_transformer import QueryTransformer
+from src.db_services.milvus.connection_manager import MilvusConnectionManager
+from src.evaluate.evaluate import QAEvaluator
+from src.evaluate.rag import RAGASEvaluator
+from src.mcp.mcp_client import MCPClient, mcp_main
+from src.memory.conversation_manager import ConversationMemory
+from src.memory.mem0_manager import Mem0Manager
+from src.models.embedding import TextEmbedding
+from src.models.llm import LLMWrapper
+from src.utils.prompt import PromptManager
 
 logger = setup_logger(__name__)
 
 
+async def _collect_generator(agen: AsyncGenerator[Dict, None]) -> Dict:
+    """从 async generator 收集结果"""
+    result = {}
+    async for item in agen:
+        result = item
+    return result
+
+
 class QAPipeline:
     def __init__(self, config: AppConfig, langfuse_client: Optional[get_client] = None):
-
         self.logger = logger
         self.config = config
         self.langfuse_client = langfuse_client
         self.user_id = None
         self.session_id = None
+
+        # 用于避免并发调用导致重复初始化
+        self._initialized = False
+        self._init_lock = asyncio.Lock()
 
         self.conversations: Optional[ConversationMemory] = None
         self.memory: Optional[Mem0Manager] = None
@@ -51,6 +64,16 @@ class QAPipeline:
         self.llm_caller: Optional[LLMWrapper] = None
         self.embeddings: Optional[TextEmbedding] = None
 
+    async def _ensure_initialized(self) -> None:
+        """确保组件已初始化（支持调用方不手动 init_components）"""
+        if self._initialized:
+            return
+        async with self._init_lock:
+            if self._initialized:
+                return
+            await self.init_components()
+            self._initialized = True
+
     async def init_components(self):
         self.logger.info("初始化 QAPipeline...")
 
@@ -63,7 +86,7 @@ class QAPipeline:
         self.logger.info("初始化文本分割器...")
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.config.splitter.chunk_size,
-            chunk_overlap=self.config.splitter.chunk_overlap
+            chunk_overlap=self.config.splitter.chunk_overlap,
         )
 
         self.logger.info("初始化消息构建器...")
@@ -71,9 +94,14 @@ class QAPipeline:
 
         self.logger.info("初始化向量数据库管理器...")
         # 使用统一的 MilvusDB 入口类
-        self.db_connection_manager = MilvusConnectionManager(self.embeddings, self.text_splitter, self.config.milvus,
-                                                             self.config.retrieve, self.config.reranker,
-                                                             self.config.bm25)
+        self.db_connection_manager = MilvusConnectionManager(
+            self.embeddings,
+            self.text_splitter,
+            self.config.milvus,
+            self.config.retrieve,
+            self.config.reranker,
+            self.config.bm25,
+        )
 
         self.logger.info("初始化 MCP 客户端...")
         self.mcp_client = MCPClient(self.llm_caller)
@@ -83,11 +111,18 @@ class QAPipeline:
         self.ragas_evaluator = RAGASEvaluator(config=self.config.evaluation)
         self.logger.info("初始化工具管理器...")
         self.logger.info("初始化查询转换器...")
-        self.query_transformer = QueryTransformer(self.llm_caller, self.message_builder, self.embeddings,
-                                                  self.db_connection_manager)
+        self.query_transformer = QueryTransformer(
+            self.llm_caller,
+            self.message_builder,
+            self.embeddings,
+            self.db_connection_manager,
+            self.config.prompt,
+        )
         self.logger.info("初始化 prompt manager")
         self.prompt_manager = PromptManager(self.langfuse_client)
-        prompt_key = "kb_system_prompt" if self.config.retrieve.use_kb else "system_prompt"
+        prompt_key = (
+            "kb_system_prompt" if self.config.retrieve.use_kb else "system_prompt"
+        )
         self.system_prompt_template = self.prompt_manager.get_prompt(prompt_key)
 
         self.logger.info("初始化对话记忆...")
@@ -109,13 +144,20 @@ class QAPipeline:
         stm = self.conversations.get_messages()  # List[Dict[str, str]] openai格式
         # 长期记忆
         if self.config.retrieve.use_memory:
-            ltm = await self.memory.search(query=query, user_id=self.user_id)  # List[Dict[str, str]] openai格式
+            ltm = await self.memory.search(
+                query=query, user_id=self.user_id
+            )  # List[Dict[str, str]] openai格式
             ltm = [item["memory"] for item in ltm["results"]]
         else:
             ltm = []
         # 构建消息
-        messages = self.message_builder.build(query=query, context=context, stm=stm, ltm=ltm,
-                                              system_prompt_template=self.system_prompt_template)
+        messages = self.message_builder.build(
+            query=query,
+            context=context,
+            stm=stm,
+            ltm=ltm,
+            system_prompt_template=self.system_prompt_template,
+        )
         return messages, context
 
     async def _retrieve_kb_context(self, query: str) -> tuple[str, str]:
@@ -130,7 +172,9 @@ class QAPipeline:
         self.logger.info("开始知识库检索")
 
         # 确定并执行检索逻辑
-        use_hyde = retrieve_config.use_rewrite and retrieve_config.rewrite_mode == 'hyde'
+        use_hyde = (
+            retrieve_config.use_rewrite and retrieve_config.rewrite_mode == "hyde"
+        )
 
         if use_hyde:
             results = await self.query_transformer.hyde_search(query, retrieve_config)
@@ -139,8 +183,12 @@ class QAPipeline:
 
         # 处理检索结果
         if results and results[0]:
-            kb_context_docs = "\n".join([f"【文档{i + 1}】{doc.get('text', '内容缺失')}"
-                                         for i, doc in enumerate(results)])
+            kb_context_docs = "\n".join(
+                [
+                    f"【文档{i + 1}】{doc.get('text', '内容缺失')}"
+                    for i, doc in enumerate(results)
+                ]
+            )
             return f"【知识库检索内容】\n{kb_context_docs}", kb_context_docs
         else:
             return "【知识库检索内容】\n未检索到相关知识。", ""
@@ -172,7 +220,7 @@ class QAPipeline:
         tool_context_raw = ""
         if tool_formatted_context:
             context_blocks.append(tool_formatted_context)
-            tool_context_raw = tool_formatted_context.split('\n', 1)[-1]
+            tool_context_raw = tool_formatted_context.split("\n", 1)[-1]
 
         # --- Step 2: 知识库检索 ---
         kb_formatted_context, kb_context_raw = await self._retrieve_kb_context(query)
@@ -185,7 +233,16 @@ class QAPipeline:
         return final_context, summary_context
 
     @observe(name="QAPipline.ask", as_type="chain")
-    async def ask(self, query: str, config: SearchConfig = None, user_id="admin", session_id=None) -> Dict:
+    async def ask(
+        self, query: str, config: SearchConfig = None, user_id="admin", session_id=None
+    ) -> AsyncGenerator[Dict, None]:
+        # 支持用户直接调用 ask，而不是显式先 init_components
+        try:
+            await self._ensure_initialized()
+        except Exception as e:
+            self.logger.exception("初始化组件失败")
+            yield {"error": f"初始化组件失败: {str(e)}"}
+            return
 
         self.user_id = user_id
         self.session_id = session_id
@@ -194,85 +251,76 @@ class QAPipeline:
 
         if self.session_id:
             self.logger.info(f"更新当前追踪用户及会话ID: {user_id}, {session_id}")
-            self.langfuse_client.update_current_trace(user_id=self.user_id, session_id=self.session_id)
+            self.langfuse_client.update_current_trace(
+                user_id=self.user_id, session_id=self.session_id
+            )
 
         self.logger.info(f"收到问题: {query}")
-        if not query.strip():
-            self.logger.error("问题不能为空")
-            return {"error": "问题不能为空"}
-
-        try:
-            if self.config.retrieve.use_rewrite and self.config.retrieve.rewrite_mode != "hyde":
-                self.logger.info(f"使用 {self.config.retrieve.rewrite_mode} 模式重写查询")
-                query = self.query_transformer.transform_query(query, self.config.retrieve.rewrite_mode)
-
-            self.logger.debug(
-                f"查询参数: k={self.config.retrieve.top_k}, use_sparse={self.config.retrieve.use_sparse}, use_reranker={self.config.retrieve.use_reranker}")
-            messages, context = await self._build_messages(query)
-            self.logger.info("开始调用 LLM 生成回答")
-            answer = await self.llm_caller.achat(messages, extra_body=self.config.retrieve.extra_body)
-            self.logger.info("LLM 回答生成完成")
-
-            if self.config.retrieve.use_memory:
-                self.logger.debug("更新对话记忆")
-                asyncio.create_task(
-                    self.memory.add(messages=[{"role": "user", "content": query}], user_id=self.user_id,
-                                    run_id=self.session_id)
-                )
-
-            return {"question": query, "answer": answer, "context": context}
-        except Exception as e:
-            self.logger.exception("处理请求时发生异常")
-            return {"error": f"处理请求时出错: {str(e)}"}
-
-    @observe(name="QAPipline.ask_stream")
-    async def ask_stream(self, query: str, config: SearchConfig = None, user_id="admin", session_id=None):
-        self.user_id = user_id
-        self.session_id = session_id
-        if config:
-            self.config.retrieve = config
-        self.logger.info(f"收到流式问题: {query}")
         if not query.strip():
             self.logger.error("问题不能为空")
             yield {"error": "问题不能为空"}
             return
 
         try:
-            if self.config.retrieve.use_rewrite:
-                self.logger.info(f"使用 {self.config.retrieve.rewrite_mode} 模式重写查询")
-                query = self.query_transformer.transform_query(query, self.config.retrieve.rewrite_mode)
+            if (
+                self.config.retrieve.use_rewrite
+                and self.config.retrieve.rewrite_mode != "hyde"
+            ):
+                self.logger.info(
+                    f"使用 {self.config.retrieve.rewrite_mode} 模式重写查询"
+                )
+                query = self.query_transformer.transform_query(
+                    query, self.config.retrieve.rewrite_mode
+                )
 
             self.logger.debug(
-                f"流式查询参数: k={self.config.retrieve.top_k}, use_sparse={self.config.retrieve.use_sparse}, use_reranker={self.config.retrieve.use_reranker}")
+                f"查询参数: k={self.config.retrieve.top_k}, use_sparse={self.config.retrieve.use_sparse}, use_reranker={self.config.retrieve.use_reranker}"
+            )
             messages, context = await self._build_messages(query)
-            self.logger.info("开始流式调用 LLM")
-            stream = await self.llm_caller.achat(messages, stream=True, extra_body=self.config.retrieve.extra_body)
-            answer = ""
-            async for chunk in stream:
-                delta = getattr(chunk.choices[0].delta, 'content', None)
-                if delta:
-                    answer += delta
-                    yield {"delta": delta}
+            self.logger.info("开始调用 LLM 生成回答")
+            answer = await self.llm_caller.achat(
+                messages, extra_body=self.config.retrieve.extra_body
+            )
+            self.logger.info("LLM 回答生成完成")
 
-            self.logger.info("流式回答生成完成")
             if self.config.retrieve.use_memory:
                 self.logger.debug("更新对话记忆")
                 asyncio.create_task(
                     self.memory.add(
-                        messages=[{"role": "user", "content": query}, {"role": "assistant", "content": answer}],
-                        user_id=self.user_id, run_id=self.session_id)
+                        messages=[
+                            {"role": "user", "content": query},
+                            {"role": "assistant", "content": answer},
+                        ],
+                        user_id=self.user_id,
+                        run_id=self.session_id,
+                    )
+                ).add_done_callback(
+                    lambda t: self.logger.debug("记忆更新任务完成")
+                    if not t.exception()
+                    else self.logger.error(f"记忆更新失败: {t.exception()}")
                 )
 
         except Exception as e:
             self.logger.exception("处理流式请求时发生异常")
             yield {"error": f"处理请求时出错: {str(e)}"}
+            return
+
+        # 正常返回答案（AsyncGenerator 需要显式 yield，否则调用方会拿到空结果）
+        try:
+            # 这里的 `messages, context` 仅在 try 块成功时存在
+            yield {
+                "question": query,
+                "answer": answer,
+                "context": context,
+            }
+        except Exception as e:
+            self.logger.exception("组装返回结果失败")
+            yield {"error": f"组装返回结果失败: {str(e)}"}
 
     @observe(name="QAPipline.batch_ask")
     async def batch_ask(self, questions: List[str]) -> List[Dict]:
         self.logger.info(f"开始批量处理 {len(questions)} 个问题")
-        # 创建一系列异步任务
-        tasks = [self.ask(q) for q in questions]
-        # 使用 asyncio.gather 并发执行所有任务
+        tasks = [_collect_generator(self.ask(q)) for q in questions]
         results = await asyncio.gather(*tasks)
         self.logger.info("批量处理完成")
         return results
@@ -281,7 +329,7 @@ class QAPipeline:
     async def evaluate(self, qa_pairs):
         """
         评估问答对
-        
+
         Args:
             qa_pairs: 问答对列表
         """
@@ -293,12 +341,14 @@ class QAPipeline:
             # 准备 RAGAS 评估数据
             async def run_and_format_ask(pair):
                 """内部异步函数，用于执行 ask 并格式化 RAGAS 需要的数据"""
-                result = await self.ask(pair["question"])
+                result = await _collect_generator(self.ask(pair["question"]))
                 return {
                     "query": pair["question"],
                     "prediction": result["answer"],
-                    "contexts": result.get("context", "").split("\n") if result.get("context") else [],
-                    "ground_truths": [pair["answer"]]
+                    "contexts": result.get("context", "").split("\n")
+                    if result.get("context")
+                    else [],
+                    "ground_truths": [pair["answer"]],
                 }
 
             # 使用 asyncio.gather 并发执行所有问答任务

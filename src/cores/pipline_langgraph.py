@@ -5,39 +5,41 @@
 @File ：pipline_langgraph.py
 @IDE ：PyCharm
 """
+
 """
 基于LangGraph的QA Pipeline重构
 使用状态图来管理复杂的RAG工作流
 """
 
-from typing import List, Dict, Optional, Annotated, Any
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph import add_messages
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.messages.base import BaseMessage
-from langchain_core.runnables import RunnableConfig
-
 import asyncio
 import concurrent.futures
-from src.configs.logger_config import setup_logger
-from src.configs.config import AppConfig
-from src.models.embedding import TextEmbedding
-from src.db_services.milvus.connection_manager import MilvusConnectionManager
-from src.models.llm import LLMWrapper
-from src.cores.query_transformer import QueryTransformer
-from src.mcp.mcp_client import MCPClient, mcp_main
-from src.cores.message_builder import MessageBuilder
+from typing import Annotated, Any, Dict, List, Optional
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages.base import BaseMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph, add_messages
 from pydantic import BaseModel
+
+from src.configs.config import AppConfig
+from src.configs.logger_config import setup_logger
+from src.cores.message_builder import MessageBuilder
+from src.cores.query_transformer import QueryTransformer
+from src.db_services.milvus.connection_manager import MilvusConnectionManager
+from src.mcp.mcp_client import MCPClient, mcp_main
+from src.models.embedding import TextEmbedding
+from src.models.llm import LLMWrapper
 
 logger = setup_logger(__name__)
 
 
 class QAState(BaseModel):
     """QA Pipeline的状态定义"""
+
     # 核心数据
     messages: Annotated[List[Any], add_messages] = []
     original_query: str
@@ -52,10 +54,7 @@ class QAState(BaseModel):
 
 
 def build_prompt_messages(
-        state: QAState,
-        system_prompt: str,
-        use_memory=False,
-        memory_limit: int = 10
+    state: QAState, system_prompt: str, use_memory=False, memory_limit: int = 10
 ) -> List:
     """构建用于 LLM 调用的消息序列"""
 
@@ -66,19 +65,17 @@ def build_prompt_messages(
     # 添加历史消息（如有）
     if use_memory and state.messages:
         history_messages = [
-            msg for msg in state.messages
-            if not isinstance(msg, SystemMessage)
+            msg for msg in state.messages if not isinstance(msg, SystemMessage)
         ]
         messages.extend(history_messages[-memory_limit:])
 
     # 构建用户消息（包含上下文 + 原始/转换查询）
     query_content = state.original_query
 
-    if (
-            state.transformed_query
-            and state.transformed_query != state.original_query
-    ):
-        query_content = f"原始问题：{state.original_query}\n转换后的问题：{state.transformed_query}"
+    if state.transformed_query and state.transformed_query != state.original_query:
+        query_content = (
+            f"原始问题：{state.original_query}\n转换后的问题：{state.transformed_query}"
+        )
 
     if state.final_context:
         query_content = f"上下文信息：\n{state.final_context}\n\n问题：{query_content}"
@@ -102,23 +99,34 @@ class LangGraphQAPipeline:
         self.logger.info("初始化QA Pipeline组件...")
 
         # 文本嵌入
-        self.embeddings = TextEmbedding(self.config.embedding)
+        self.embeddings = TextEmbedding(self.config)
 
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.config.splitter.chunk_size,
-            chunk_overlap=self.config.splitter.chunk_overlap
+            chunk_overlap=self.config.splitter.chunk_overlap,
         )
         self.message_builder = MessageBuilder(self.config.message_builder)
 
         # 向量数据库
-        self.db_connection_manager = MilvusConnectionManager(self.embeddings, self.text_splitter, self.config.milvus)
+        self.db_connection_manager = MilvusConnectionManager(
+            self.embeddings,
+            self.text_splitter,
+            self.config.milvus,
+            self.config.retrieve,
+            self.config.reranker,
+            self.config.bm25,
+        )
 
         # LLM包装器
         self.llm_caller = LLMWrapper(self.config.llm)
 
         # 查询转换器
         self.query_transformer = QueryTransformer(
-            self.llm_caller, self.message_builder, self.embeddings, self.db_connection_manager)
+            self.llm_caller,
+            self.message_builder,
+            self.embeddings,
+            self.db_connection_manager,
+        )
 
         # MCP客户端
         self.mcp_client = MCPClient(self.llm_caller)
@@ -133,7 +141,7 @@ class LangGraphQAPipeline:
                 self.langfuse_client = Langfuse(
                     secret_key=self.config.langfuse.secret_key,
                     public_key=self.config.langfuse.public_key,
-                    host=self.config.langfuse.host
+                    host=self.config.langfuse.host,
                 )
                 self.langfuse_handler = CallbackHandler()
                 self.logger.info("Langfuse 客户端初始化完成")
@@ -148,7 +156,9 @@ class LangGraphQAPipeline:
         # 添加节点
         workflow.add_node("parse_query", self._parse_query)  # 解析查询及配置参数
         workflow.add_node("transform_query", self._transform_query)  # 转换查询
-        workflow.add_node("check_retrieve_knowledge", self._check_retrieve_knowledge)  # 检查是否需要检索知识库
+        workflow.add_node(
+            "check_retrieve_knowledge", self._check_retrieve_knowledge
+        )  # 检查是否需要检索知识库
         workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("check_call_tools", self._check_call_tools)
         workflow.add_node("call_tools", self._call_tools)
@@ -175,8 +185,8 @@ class LangGraphQAPipeline:
             {
                 "transform": "transform_query",
                 "skip_transform": "check_retrieve_knowledge",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
         # 当执行transform_query时
         workflow.add_conditional_edges(
@@ -185,8 +195,8 @@ class LangGraphQAPipeline:
             {
                 "do_retrieve": "retrieve_knowledge",
                 "skip_retrieve": "check_call_tools",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
 
         workflow.add_conditional_edges(
@@ -195,8 +205,8 @@ class LangGraphQAPipeline:
             {
                 "call_tools": "call_tools",
                 "skip_tools": "build_context",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
 
         # 是否需要知识库检索
@@ -206,8 +216,8 @@ class LangGraphQAPipeline:
             {
                 "do_retrieve": "retrieve_knowledge",
                 "skip_retrieve": "check_call_tools",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
 
         # 知识检索后的条件分支
@@ -217,8 +227,8 @@ class LangGraphQAPipeline:
             {
                 "call_tools": "call_tools",
                 "skip_tools": "build_context",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
 
         # 工具调用后构建上下文
@@ -231,11 +241,7 @@ class LangGraphQAPipeline:
         workflow.add_conditional_edges(
             "generate_answer",
             self._should_update_memory,
-            {
-                "update_memory": "update_memory",
-                "finish": END,
-                "error": "handle_error"
-            }
+            {"update_memory": "update_memory", "finish": END, "error": "handle_error"},
         )
 
         # 更新记忆后结束
@@ -260,7 +266,10 @@ class LangGraphQAPipeline:
                 use_memory=self.config.retrieve.use_memory,
                 error=None,
             )
-            merged = {**defaults, **(state.model_dump() if isinstance(state, BaseModel) else state)}
+            merged = {
+                **defaults,
+                **(state.model_dump() if isinstance(state, BaseModel) else state),
+            }
             state = QAState(**merged)
             return state
         except Exception as e:
@@ -306,10 +315,17 @@ class LangGraphQAPipeline:
             self.logger.info(f"开始知识库检索: {query}")
 
             # 选择检索方法
-            if self.config.retrieve.use_rewrite and self.config.retrieve.rewrite_mode == "hyde":
-                results = await self.query_transformer.hyde_search(query, self.config.retrieve.search_config)
+            if (
+                self.config.retrieve.use_rewrite
+                and self.config.retrieve.rewrite_mode == "hyde"
+            ):
+                results = await self.query_transformer.hyde_search(
+                    query, self.config.retrieve.search_config
+                )
             else:
-                results = await self.db_connection_manager.asearch(query, self.config.retrieve.search_config)
+                results = await self.db_connection_manager.asearch(
+                    query, self.config.retrieve.search_config
+                )
 
             # 处理检索结果
             if not results:
@@ -321,7 +337,10 @@ class LangGraphQAPipeline:
                     state.kb_context = "未检索到有效知识。"
                 else:
                     kb_context = "\n".join(
-                        [f"【文档{i + 1}】{doc['text']}" for i, doc in enumerate(valid_results)]
+                        [
+                            f"【文档{i + 1}】{doc['text']}"
+                            for i, doc in enumerate(valid_results)
+                        ]
                     )
                     state.kb_context = f"【知识库检索内容】\n{kb_context}"
                 self.logger.info(f"知识库检索返回 {len(results)} 条结果")
@@ -409,7 +428,7 @@ class LangGraphQAPipeline:
                 state,
                 system_prompt=system_prompt,
                 use_memory=self.config.retrieve.use_memory,
-                memory_limit=self.config.retrieve.memory_window_size
+                memory_limit=self.config.retrieve.memory_window_size,
             )
 
             # 调用 LLM 生成答案
@@ -420,7 +439,7 @@ class LangGraphQAPipeline:
                 state.messages = []
             state.messages += [
                 HumanMessage(content=state.original_query),
-                AIMessage(content=answer)
+                AIMessage(content=answer),
             ]
 
             self.logger.info("答案生成完成")
@@ -455,7 +474,9 @@ class LangGraphQAPipeline:
             state.messages = []
 
         # 添加错误消息到对话历史
-        state.messages.append(AIMessage(content=f"抱歉，处理您的请求时出现错误：{error_msg}"))
+        state.messages.append(
+            AIMessage(content=f"抱歉，处理您的请求时出现错误：{error_msg}")
+        )
 
         return state
 
@@ -512,9 +533,7 @@ class LangGraphQAPipeline:
         }
 
         updates = {
-            field: kwargs[key]
-            for field, key in field_map.items()
-            if key in kwargs
+            field: kwargs[key] for field, key in field_map.items() if key in kwargs
         }
 
         if updates:
@@ -553,7 +572,8 @@ class LangGraphQAPipeline:
 
             # 提取最后的AI消息作为答案
             ai_messages = [
-                msg.content for msg in result.get("messages", [])
+                msg.content
+                for msg in result.get("messages", [])
                 if isinstance(msg, AIMessage)
             ]
 
@@ -566,7 +586,7 @@ class LangGraphQAPipeline:
                 "transformed_query": result.get("transformed_query", ""),
                 "context": result.get("final_context", ""),
                 "kb_context": result.get("kb_context", ""),
-                "tool_context": result.get("tool_context", "")
+                "tool_context": result.get("tool_context", ""),
             }
 
         except Exception as e:
@@ -603,7 +623,7 @@ class LangGraphQAPipeline:
                     yield {
                         "node": node_name,
                         "status": "error",
-                        "error": node_state.error
+                        "error": node_state.error,
                     }
                     continue
 
@@ -614,8 +634,8 @@ class LangGraphQAPipeline:
                     "state": {
                         "kb_context": node_state.kb_context,
                         "tool_context": node_state.tool_context,
-                        "final_context": node_state.final_context
-                    }
+                        "final_context": node_state.final_context,
+                    },
                 }
 
                 # 如果是生成答案节点，实现流式生成
@@ -624,7 +644,8 @@ class LangGraphQAPipeline:
                     if messages:
                         # 获取最后一条AI消息
                         ai_messages = [
-                            msg.content for msg in messages
+                            msg.content
+                            for msg in messages
                             if isinstance(msg, AIMessage)
                         ]
                         if ai_messages:
@@ -632,15 +653,12 @@ class LangGraphQAPipeline:
                                 "node": "generate_answer",
                                 "status": "complete",
                                 "answer": ai_messages[-1],
-                                "context": node_state.final_context
+                                "context": node_state.final_context,
                             }
 
         except Exception as e:
             self.logger.error(f"流式问答处理失败: {e}")
-            yield {
-                "status": "error",
-                "error": f"处理请求时出错: {str(e)}"
-            }
+            yield {"status": "error", "error": f"处理请求时出错: {str(e)}"}
 
     def batch_ask(self, questions: List[str], **kwargs) -> List[Dict]:
         """批量问答"""
@@ -653,7 +671,7 @@ class LangGraphQAPipeline:
             mermaid_code = self.graph.get_graph().draw_mermaid()
 
             # 保存到文件
-            with open(output_path.replace('.png', '.mmd'), 'w', encoding='utf-8') as f:
+            with open(output_path.replace(".png", ".mmd"), "w", encoding="utf-8") as f:
                 f.write(mermaid_code)
 
             self.logger.info(f"图结构已导出到: {output_path}")

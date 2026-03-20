@@ -5,8 +5,10 @@
 @File ：memory.py
 @IDE ：PyCharm
 """
+
 from collections import deque
-from typing import List, Dict
+from typing import Dict, List
+
 from src.configs.logger_config import setup_logger
 from src.configs.retrieve_config import SearchConfig
 
@@ -23,11 +25,11 @@ class ConversationMemory:
 
     def add(self, question: str, answer: str):
         """添加一轮对话"""
-        self.memory.append({
-            "user": question,
-            "assistant": answer
-        })
-        self.logger.info(f"添加新对话 - 问题: {question[:50]}...")
+        if not question or not answer:
+            self.logger.warning("跳过空的对话记录")
+            return
+        self.memory.append({"user": question, "assistant": answer})
+        self.logger.debug(f"添加新对话 - 问题: {question[:50]}...")
 
     def get_history(self) -> str:
         """格式化返回文本历史"""
@@ -56,14 +58,16 @@ class ConversationMemory:
     def save(self, path: str):
         """保存到本地 JSON 文件"""
         import json
-        with open(path, 'w', encoding='utf-8') as f:
+
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(list(self.memory), f, ensure_ascii=False, indent=2)
         self.logger.info(f"保存对话历史到文件: {path}")
 
     def load(self, path: str):
         """从 JSON 文件加载历史"""
         import json
-        with open(path, 'r', encoding='utf-8') as f:
+
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
             self.memory = deque(data, maxlen=self.config.memory_window_size)
         self.logger.info(f"从文件加载对话历史: {path}，加载了 {len(data)} 轮对话")
