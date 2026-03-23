@@ -11,7 +11,7 @@
 
 import asyncio
 import concurrent.futures
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, Generator, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages.base import BaseMessage
@@ -52,22 +52,20 @@ class QAState(BaseModel):
 
 
 def build_prompt_messages(
-    state: QAState, system_prompt: str, use_memory=False, memory_limit: int = 10
-) -> List:
+    state: QAState,
+    system_prompt: str,
+    use_memory: bool = False,
+    memory_limit: int = 10,
+) -> List[BaseMessage]:
     """构建用于 LLM 调用的消息序列"""
-
     messages: List[BaseMessage] = [SystemMessage(content=system_prompt)]
 
-    # 添加系统提示
-
-    # 添加历史消息（如有）
     if use_memory and state.messages:
         history_messages = [
             msg for msg in state.messages if not isinstance(msg, SystemMessage)
         ]
         messages.extend(history_messages[-memory_limit:])
 
-    # 构建用户消息（包含上下文 + 原始/转换查询）
     query_content = state.original_query
 
     if state.transformed_query and state.transformed_query != state.original_query:
@@ -253,8 +251,7 @@ class LangGraphQAPipeline:
     def _parse_query(self, state: QAState) -> QAState:
         """解析查询，设置默认参数"""
         try:
-            self.logger.info(f"解析查询: {state.original_query}")
-            # 定义默认配置
+            self.logger.info(f"解析查询：{state.original_query}")
             defaults = dict(
                 k=self.config.retrieve.top_k,
                 use_sparse=self.config.retrieve.use_sparse,
@@ -271,6 +268,10 @@ class LangGraphQAPipeline:
             state = QAState(**merged)
             return state
         except Exception as e:
+            self.logger.exception(f"解析查询失败：{e}")
+            state.error = f"解析查询失败：{str(e)}"
+            return state
+        except Exception as e:
             self.logger.error(f"解析查询失败: {e}")
             state.error = f"解析查询失败: {str(e)}"
             return state
@@ -278,17 +279,22 @@ class LangGraphQAPipeline:
     def _transform_query(self, state: QAState) -> QAState:
         """查询转换"""
         try:
-            self.logger.info(f"转换查询: {state.original_query}")
+            self.logger.info(f"转换查询：{state.original_query}")
 
             if self.config.retrieve.use_rewrite:
                 transformed_query = self.query_transformer.transform_query(
                     state.original_query, self.config.retrieve.rewrite_mode
                 )
                 state.transformed_query = transformed_query
-                self.logger.info(f"查询转换完成: {transformed_query}")
+                self.logger.info(f"查询转换完成：{transformed_query}")
             else:
                 state.transformed_query = ""
 
+            return state
+
+        except Exception as e:
+            self.logger.exception(f"查询转换失败：{e}")
+            state.error = f"查询转换失败：{str(e)}"
             return state
 
         except Exception as e:
@@ -350,7 +356,7 @@ class LangGraphQAPipeline:
             return state
 
         except Exception as e:
-            self.logger.error(f"知识库检索失败：{e}")
+            self.logger.exception(f"知识库检索失败：{e}")
             state.error = f"知识库检索失败：{str(e)}"
             return state
 
@@ -383,8 +389,31 @@ class LangGraphQAPipeline:
             return state
 
         except Exception as e:
-            self.logger.error(f"工具调用失败: {e}")
-            state.error = f"工具调用失败: {str(e)}"
+            self.logger.exception(f"工具调用失败：{e}")
+            state.error = f"工具调用失败：{str(e)}"
+            return state
+
+    def _build_context(self, state: QAState) -> QAState:
+        """构建最终上下文"""
+        try:
+            self.logger.info("构建最终上下文")
+
+            context_parts = []
+
+            if state.tool_context:
+                context_parts.append(state.tool_context)
+
+            if state.kb_context:
+                context_parts.append(state.kb_context)
+
+            state.final_context = "\n\n".join(context_parts)
+            self.logger.info(f"上下文构建完成，长度：{len(state.final_context)}")
+
+            return state
+
+        except Exception as e:
+            self.logger.exception(f"构建上下文失败：{e}")
+            state.error = f"构建上下文失败：{str(e)}"
             return state
 
     def _build_context(self, state: QAState) -> QAState:
@@ -448,23 +477,23 @@ class LangGraphQAPipeline:
             return state
 
         except Exception as e:
-            self.logger.error(f"生成答案失败: {e}")
-            state.error = f"生成答案失败: {str(e)}"
+            self.logger.exception(f"生成答案失败：{e}")
+            state.error = f"生成答案失败：{str(e)}"
             return state
 
     def _update_memory(self, state: QAState) -> QAState:
         """更新记忆"""
         try:
             if self.config.retrieve.use_memory and state.messages:
-                # 确保消息历史不超过最大长度
-                max_history = 10  # 可根据需要调整
+                max_history = self.config.retrieve.memory_window_size
                 state.messages = state.messages[-max_history:]
-                self.logger.info(f"记忆更新完成，当前历史消息数: {len(state.messages)}")
+                self.logger.info(f"记忆更新完成，当前历史消息数：{len(state.messages)}")
             return state
         except Exception as e:
-            self.logger.error(f"更新记忆失败: {e}")
-            state.error = f"更新记忆失败: {str(e)}"
+            self.logger.exception(f"更新记忆失败：{e}")
+            state.error = f"更新记忆失败：{str(e)}"
             return state
+
 
     def _handle_error(self, state: QAState) -> QAState:
         """处理错误"""
@@ -545,7 +574,7 @@ class LangGraphQAPipeline:
 
     # =================== 外部接口 ===================
 
-    def ask(self, query: str, **kwargs) -> Dict:
+    def ask(self, query: str, **kwargs) -> Dict[str, Any]:
         """同步问答接口"""
         # 创建配置对象
         config = RunnableConfig(
@@ -595,7 +624,7 @@ class LangGraphQAPipeline:
             self.logger.error(f"问答处理失败: {e}")
             return {"error": f"处理请求时出错: {str(e)}"}
 
-    def ask_stream(self, query: str, **kwargs):
+    def ask_stream(self, query: str, **kwargs) -> Generator[Dict[str, Any], None, None]:
         """流式问答接口"""
 
         # 创建配置对象
@@ -662,23 +691,21 @@ class LangGraphQAPipeline:
             self.logger.error(f"流式问答处理失败: {e}")
             yield {"status": "error", "error": f"处理请求时出错: {str(e)}"}
 
-    def batch_ask(self, questions: List[str], **kwargs) -> List[Dict]:
+    def batch_ask(self, questions: List[str], **kwargs) -> List[Dict[str, Any]]:
         """批量问答"""
         return [self.ask(q, **kwargs) for q in questions]
 
-    def export_graph(self, output_path: str = "qa_pipeline_graph.png"):
+    def export_graph(self, output_path: str = "qa_pipeline_graph.png") -> str | None:
         """导出图结构"""
         try:
-            # 生成Mermaid图
             mermaid_code = self.graph.get_graph().draw_mermaid()
 
-            # 保存到文件
             with open(output_path.replace(".png", ".mmd"), "w", encoding="utf-8") as f:
                 f.write(mermaid_code)
 
-            self.logger.info(f"图结构已导出到: {output_path}")
+            self.logger.info(f"图结构已导出到：{output_path}")
             return mermaid_code
 
         except Exception as e:
-            self.logger.error(f"导出图结构失败: {e}")
+            self.logger.error(f"导出图结构失败：{e}")
             return None

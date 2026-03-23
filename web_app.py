@@ -8,8 +8,7 @@
 
 import os
 import uuid
-from typing import Optional
-
+from typing import AsyncGenerator, Optional, Tuple
 
 import gradio as gr
 from langfuse import get_client
@@ -50,17 +49,17 @@ async def init_rag_client():
 
 
 async def chat_ask(
-    query,
-    use_kb,
-    use_tool,
-    use_memory,
-    top_k,
-    use_sparse,
-    use_reranker,
-    enable_think,
-    session_id,
-    history,
-):
+    query: str,
+    use_kb: bool,
+    use_tool: bool,
+    use_memory: bool,
+    top_k: int,
+    use_sparse: bool,
+    use_reranker: bool,
+    enable_think: bool,
+    session_id: str,
+    history: list[list[str]],
+) -> Tuple[str, list[list[str]]]:
     """同步问答接口"""
     if not query or not query.strip():
         return "", history
@@ -172,17 +171,17 @@ async def chat_ask(
 
 
 async def chat_stream(
-    query,
-    use_kb,
-    use_tool,
-    use_memory,
-    top_k,
-    use_sparse,
-    use_reranker,
-    enable_think,
-    session_id,
-    history,
-):
+    query: str,
+    use_kb: bool,
+    use_tool: bool,
+    use_memory: bool,
+    top_k: int,
+    use_sparse: bool,
+    use_reranker: bool,
+    enable_think: bool,
+    session_id: str,
+    history: list[list[str]],
+) -> AsyncGenerator[list[list[str]], None]:
     """流式问答接口"""
     if not query or not query.strip():
         yield history
@@ -301,10 +300,8 @@ async def chat_stream(
         yield history
 
 
-def clear_memory_action():
+def clear_memory_action() -> Tuple[list, str]:
     """清空记忆（LangGraph 使用 checkpointer 管理状态）"""
-    # LangGraph 通过 thread_id 管理会话状态，清空记忆需要清除 checkpointer
-    # 这里简单处理，返回空历史
     logger.info("清空对话记忆")
     return [], ""
 
@@ -574,25 +571,23 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
 
     # ================= 事件绑定 =================
 
-    # 包装响应函数以处理 State
     async def respond_wrapper(
-        message,
-        history,
-        kb,
-        tool,
-        memory,
-        stream,
-        k,
-        sparse,
-        rerank,
-        enable_think,
-        sess_id,
-    ):
+        message: str,
+        history: list[list[str]],
+        kb: bool,
+        tool: bool,
+        memory: bool,
+        stream: bool,
+        k: int,
+        sparse: bool,
+        rerank: bool,
+        enable_think: bool,
+        sess_id: str,
+    ) -> AsyncGenerator[Tuple[str, list[list[str]], str], None]:
         if not message.strip():
             yield "", history, sess_id
             return
 
-        # 确保有 Session ID
         current_sess_id = sess_id if sess_id else str(uuid.uuid4())
 
         if stream:
@@ -624,8 +619,7 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
             )
             yield "", updated_history, current_sess_id
 
-    # 包装重置函数
-    def reset_wrapper():
+    def reset_wrapper() -> Tuple[list, str, str, str]:
         new_sid = str(uuid.uuid4())
         return [], "", new_sid, new_sid
 
