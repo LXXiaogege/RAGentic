@@ -302,7 +302,7 @@ class LangGraphQAPipeline:
     def _check_call_tools(self, state: QAState) -> QAState:
         return state
 
-    async def _retrieve_knowledge(self, state: QAState) -> QAState:
+    def _retrieve_knowledge(self, state: QAState) -> QAState:
         """知识库检索"""
         try:
             if not self.config.retrieve.use_kb:
@@ -310,19 +310,23 @@ class LangGraphQAPipeline:
                 return state
 
             query = getattr(state, "transformed_query", "") or state.original_query
-            self.logger.info(f"开始知识库检索: {query}")
+            self.logger.info(f"开始知识库检索：{query}")
 
             # 选择检索方法
             if (
                 self.config.retrieve.use_rewrite
                 and self.config.retrieve.rewrite_mode == "hyde"
             ):
-                results = await self.query_transformer.hyde_search(
-                    query, self.config.retrieve.search_config
+                results = asyncio.run(
+                    self.query_transformer.hyde_search(
+                        query, self.config.retrieve.search_config
+                    )
                 )
             else:
-                results = await self.db_connection_manager.asearch(
-                    query, self.config.retrieve.search_config
+                results = asyncio.run(
+                    self.db_connection_manager.asearch(
+                        query, self.config.retrieve.search_config
+                    )
                 )
 
             # 处理检索结果
@@ -346,8 +350,8 @@ class LangGraphQAPipeline:
             return state
 
         except Exception as e:
-            self.logger.error(f"知识库检索失败: {e}")
-            state.error = f"知识库检索失败: {str(e)}"
+            self.logger.error(f"知识库检索失败：{e}")
+            state.error = f"知识库检索失败：{str(e)}"
             return state
 
     def _call_tools(self, state: QAState) -> QAState:

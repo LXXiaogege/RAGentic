@@ -92,25 +92,43 @@ class AppConfig(BaseSettings):
 
     def model_post_init(self, __context):
         """配置加载后处理：加载.env 文件和环境变量并转换路径"""
-        self._load_dotenv()
-        self._load_env_paths()
+        self._load_env_vars()
         self._resolve_paths()
 
-    def _load_dotenv(self):
-        """手动加载.env 文件（支持嵌套格式 XX__YY）"""
+    def _load_env_vars(self):
+        """统一加载配置：先加载.env 文件，再加载系统环境变量（覆盖.env）"""
+        import os
         from dotenv import dotenv_values
 
-        if not Path(ENV_PATH).exists():
-            return
+        env_mapping = {
+            "LANGFUSE__HOST": ("langfuse", "host"),
+            "LANGFUSE__PUBLIC_KEY": ("langfuse", "public_key"),
+            "LANGFUSE__SECRET_KEY": ("langfuse", "secret_key"),
+            "LLM__API_KEY": ("llm", "api_key"),
+            "LLM__BASE_URL": ("llm", "base_url"),
+            "EMBEDDING__API_KEY": ("embedding", "api_key"),
+            "EMBEDDING__BASE_URL": ("embedding", "base_url"),
+            "RERANK__MODEL_PATH": ("reranker", "rerank_model_path"),
+            "BM25__MODEL_DIR": ("bm25", "bm25_model_dir"),
+            "MILVUS__VECTOR_DB_URI": ("milvus", "vector_db_uri"),
+            "MILVUS__MEMORY_DB_URI": ("milvus", "memory_db_uri"),
+            "MEM0__HISTORY_DB_PATH": ("memory", "history_db_path"),
+            "RETRIEVE__KB_PATH": ("retrieve", "kb_path"),
+        }
 
-        env_vars = dotenv_values(ENV_PATH)
-
-        for key, value in env_vars.items():
+        def apply_env(key: str, value: str):
+            """应用单个环境变量到配置对象"""
             if value is None:
-                continue
-
-            # 处理嵌套环境变量 (XX__YY -> xx.yy)
-            if "__" in key:
+                return
+            if key in env_mapping:
+                config_name, field_name = env_mapping[key]
+                try:
+                    config_obj = getattr(self, config_name, None)
+                    if config_obj and hasattr(config_obj, field_name):
+                        setattr(config_obj, field_name, value)
+                except (AttributeError, ValueError):
+                    pass
+            elif "__" in key:
                 parts = key.lower().split("__")
                 if len(parts) == 2:
                     config_name, field_name = parts
@@ -121,59 +139,19 @@ class AppConfig(BaseSettings):
                     except (AttributeError, ValueError):
                         pass
             else:
-                # 普通环境变量
                 try:
                     if hasattr(self, key.lower()):
                         setattr(self, key.lower(), value)
                 except (AttributeError, ValueError):
                     pass
 
-    def _load_env_paths(self):
-        """从环境变量加载配置（覆盖默认值和.env 文件）"""
-        import os
+        if Path(ENV_PATH).exists():
+            for key, value in dotenv_values(ENV_PATH).items():
+                apply_env(key, value)
 
-        # Langfuse 配置
-        if env_val := os.getenv("LANGFUSE__HOST"):
-            self.langfuse.host = env_val
-        if env_val := os.getenv("LANGFUSE__PUBLIC_KEY"):
-            self.langfuse.public_key = env_val
-        if env_val := os.getenv("LANGFUSE__SECRET_KEY"):
-            self.langfuse.secret_key = env_val
-
-        # LLM 配置
-        if env_val := os.getenv("LLM__API_KEY"):
-            self.llm.api_key = env_val
-        if env_val := os.getenv("LLM__BASE_URL"):
-            self.llm.base_url = env_val
-
-        # Embedding 配置
-        if env_val := os.getenv("EMBEDDING__API_KEY"):
-            self.embedding.api_key = env_val
-        if env_val := os.getenv("EMBEDDING__BASE_URL"):
-            self.embedding.base_url = env_val
-
-        # Rerank 模型路径
-        if env_val := os.getenv("RERANK__MODEL_PATH"):
-            self.reranker.rerank_model_path = env_val
-
-        # BM25 模型目录
-        if env_val := os.getenv("BM25__MODEL_DIR"):
-            self.bm25.bm25_model_dir = env_val
-
-        # Milvus 数据库路径
-        if env_val := os.getenv("MILVUS__VECTOR_DB_URI"):
-            self.milvus.vector_db_uri = env_val
-
-        if env_val := os.getenv("MILVUS__MEMORY_DB_URI"):
-            self.milvus.memory_db_uri = env_val
-
-        # Mem0 历史数据库路径
-        if env_val := os.getenv("MEM0__HISTORY_DB_PATH"):
-            self.memory.history_db_path = env_val
-
-        # 知识库路径
-        if env_val := os.getenv("RETRIEVE__KB_PATH"):
-            self.retrieve.kb_path = env_val
+        for key in env_mapping.keys():
+            if env_val := os.getenv(key):
+                apply_env(key, env_val)
 
     def _resolve_paths(self):
         """将所有相对路径转换为相对于 BASE_DIR 的绝对路径"""
