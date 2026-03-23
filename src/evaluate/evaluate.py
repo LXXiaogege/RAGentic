@@ -21,12 +21,14 @@ logger = setup_logger(__name__)
 
 
 class QAEvaluator:
-    def __init__(self, qa_pipeline, eval_config: EvaluationConfig, search_config: SearchConfig):
+    def __init__(
+        self, qa_pipeline, eval_config: EvaluationConfig, search_config: SearchConfig
+    ):
         self.logger = logger
         self.logger.info("初始化问答评估器...")
         self.eval_config = eval_config
         self.search_config = search_config
-        self.qa_pipeline = qa_pipeline  # QAPipeline 实例
+        self.qa_pipeline = qa_pipeline  # LangGraphQAPipeline 实例
         self.llm = qa_pipeline.llm_caller
         self.logger.info("问答评估器初始化完成")
 
@@ -34,7 +36,7 @@ class QAEvaluator:
         """提取模型回答中的核心内容"""
         self.logger.debug("开始提取答案核心内容...")
         try:
-            match = re.search(r'{.*}', raw_answer, re.DOTALL)
+            match = re.search(r"{.*}", raw_answer, re.DOTALL)
             if match:
                 answer = json.loads(match.group())["answer"]
                 self.logger.debug("成功从JSON格式中提取答案")
@@ -47,15 +49,16 @@ class QAEvaluator:
         return answer
 
     @observe(name="QAEvaluator.evaluate", as_type="evaluator")
-    def evaluate(self, qa_pairs: List[Dict[str, str]]) -> List[
-        Dict]:
+    def evaluate(self, qa_pairs: List[Dict[str, str]]) -> List[Dict]:
         """
         评估问答对
-        
+
         Args:
             qa_pairs: 问答对列表
         """
-        self.logger.info(f"开始评估，使用 {self.eval_config.eval_method} 方法，检索数量 :{self.search_config.top_k}")
+        self.logger.info(
+            f"开始评估，使用 {self.eval_config.eval_method} 方法，检索数量 :{self.search_config.top_k}"
+        )
         self.logger.info(f"待评估问答对数量: {len(qa_pairs)}")
 
         try:
@@ -91,10 +94,7 @@ class QAEvaluator:
                 scores = rouge.get_scores(model_answer, pair["answer"])[0]
                 self.logger.debug(f"ROUGE 分数: {scores}")
 
-                result.update({
-                    "reference": pair["answer"],
-                    "rouge": scores
-                })
+                result.update({"reference": pair["answer"], "rouge": scores})
                 results.append(result)
 
             except Exception as e:
@@ -122,7 +122,9 @@ class QAEvaluator:
                 candidates.append(model_answer)
                 references.append(reference)
                 raw_results.append(qa_result)
-                self.logger.debug(f"答案长度: {len(model_answer)}, 参考长度: {len(reference)}")
+                self.logger.debug(
+                    f"答案长度: {len(model_answer)}, 参考长度: {len(reference)}"
+                )
             except Exception as e:
                 self.logger.error(f"处理问答对时出错: {str(e)}")
                 continue
@@ -146,15 +148,19 @@ class QAEvaluator:
 
         # 更新结果
         for result, p, r, f, ref in zip(raw_results, P, R, F1, references):
-            result.update({
-                "reference": ref,
-                "bert_score": {
-                    "precision": round(p.item(), 4),
-                    "recall": round(r.item(), 4),
-                    "f1": round(f.item(), 4)
+            result.update(
+                {
+                    "reference": ref,
+                    "bert_score": {
+                        "precision": round(p.item(), 4),
+                        "recall": round(r.item(), 4),
+                        "f1": round(f.item(), 4),
+                    },
                 }
-            })
-            self.logger.debug(f"BERTScore - P: {p.item():.4f}, R: {r.item():.4f}, F1: {f.item():.4f}")
+            )
+            self.logger.debug(
+                f"BERTScore - P: {p.item():.4f}, R: {r.item():.4f}, F1: {f.item():.4f}"
+            )
 
         self.logger.info(f"BERTScore 评估完成，成功评估 {len(raw_results)} 个问答对")
         return raw_results
@@ -172,13 +178,15 @@ class QAEvaluator:
                 qa_result = self.qa_pipeline.ask(pair["question"])
                 model_answer = self._extract_answer(qa_result["answer"])
                 reference = pair["answer"]
-                self.logger.debug(f"答案长度: {len(model_answer)}, 参考长度: {len(reference)}")
+                self.logger.debug(
+                    f"答案长度: {len(model_answer)}, 参考长度: {len(reference)}"
+                )
 
                 # 构建评估提示
                 prompt = self.eval_config.gpt_judge_prompt_template.format(
                     question=pair["question"],
                     model_answer=model_answer,
-                    reference=reference
+                    reference=reference,
                 )
                 self.logger.debug("已构建评估提示")
 
@@ -186,22 +194,22 @@ class QAEvaluator:
                 try:
                     judge = self.llm.chat(
                         messages=[
-                            {"role": "system", "content": self.eval_config.gpt_judge_system_prompt},
-                            {"role": "user", "content": prompt}
+                            {
+                                "role": "system",
+                                "content": self.eval_config.gpt_judge_system_prompt,
+                            },
+                            {"role": "user", "content": prompt},
                         ],
                         stream=False,
                         return_raw=False,
-                        extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+                        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
                     ).strip()
                     self.logger.debug(f"GPT 评估结果: {judge[:100]}...")
                 except Exception as e:
                     self.logger.error(f"GPT 评估失败: {str(e)}")
                     judge = f"ERROR: {str(e)}"
 
-                qa_result.update({
-                    "reference": reference,
-                    "gpt_judge": judge
-                })
+                qa_result.update({"reference": reference, "gpt_judge": judge})
                 results.append(qa_result)
 
             except Exception as e:

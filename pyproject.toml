@@ -36,6 +36,7 @@ dependencies = [
     "nltk>=3.9.2",
     # Web 界面
     "gradio",
+    "chainlit>=2.10.0",
 ]
 
 [[tool.uv.index]]

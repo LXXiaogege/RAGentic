@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-@Time ： 2025/11/28 15:07
-@Auth ： 吕鑫
-@File ：database_config.py
-@IDE ：PyCharm
+@Time：2025/11/28 15:07
+@Auth：吕鑫
+@File：database_config.py
+@IDE：PyCharm
 """
+
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -12,12 +13,16 @@ from pydantic import BaseModel, Field
 
 class MilvusConfig(BaseModel):
     milvus_mode: str = Field("local", description="local / remote")
-    vector_db_uri: str = Field("/Users/lvxin/PycharmProjects/RAGentic/data/knowledge_db/db/rag.db",
-                               description="Milvus URI 或 SQLite 文件路径")
+    vector_db_uri: str = Field(
+        default="data/knowledge_db/db/rag.db",
+        description="Milvus URI 或 SQLite 文件路径，可从环境变量 MILVUS__VECTOR_DB_URI 加载",
+    )
     db_user: str = "root"
     db_password: str = "Milvus"
     db_name: str = "test"
-    token: Optional[str] = Field(None, description="Zilliz Cloud 的访问令牌；本地部署时可留为 None")
+    token: Optional[str] = Field(
+        None, description="Zilliz Cloud 的访问令牌；本地部署时可留为 None"
+    )
 
     collection_name: str = "pys"
     vector_dimension: int = Field(1024, gt=0)
@@ -26,8 +31,10 @@ class MilvusConfig(BaseModel):
 
     # memory
     memory_collection_name: str = "mem0_with_milvus"
-    memory_db_uri: str = Field("/Users/lvxin/PycharmProjects/RAGentic/data/memory.db",
-                               description="memory 存储数据库文件路径")
+    memory_db_uri: str = Field(
+        default="data/memory.db",
+        description="memory 存储数据库文件路径，可从环境变量 MILVUS__MEMORY_DB_URI 加载",
+    )
 
 
 class Neo4jConfig(BaseModel):
@@ -35,10 +42,14 @@ class Neo4jConfig(BaseModel):
     username: str = Field(default="neo4j", description="Neo4j 用户名")
     password: str = Field(default="password", description="Neo4j 密码")
     database: str = Field(default="neo4j", description="Neo4j 数据库名称")
-    use_base_entity_label: bool = Field(default=False, description="是否为所有实体节点添加基础标签 __Entity__。")
+    use_base_entity_label: bool = Field(
+        default=False, description="是否为所有实体节点添加基础标签 __Entity__。"
+    )
 
 
 class RedisConfig(BaseModel):
     redis_url: str = Field(default="redis://localhost:6379", description="Redis URL")
     redis_password: str = Field(default=None, description="Redis 密码")
-    embeddings_cache_db: int = Field(default=0, description="Redis 数据库索引，用于存储嵌入缓存。")
+    embeddings_cache_db: int = Field(
+        default=0, description="Redis 数据库索引，用于存储嵌入缓存。"
+    )

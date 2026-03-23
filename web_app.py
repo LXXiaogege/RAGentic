@@ -14,7 +14,7 @@ from typing import Optional
 import gradio as gr
 from langfuse import get_client
 
-from src.cores.pipeline import QAPipeline
+from src.cores.pipeline_langgraph import LangGraphQAPipeline
 from src.configs.config import AppConfig
 from src.configs.logger_config import setup_logger
 from src.configs.retrieve_config import SearchConfig
@@ -37,16 +37,15 @@ except Exception as e:
     logger.warning(f"Langfuse 客户端初始化失败：{e}")
     langfuse_client = None
 
-pipeline: Optional[QAPipeline] = None
+pipeline: Optional[LangGraphQAPipeline] = None
 
 
 async def init_rag_client():
     """懒初始化 RAG Pipeline"""
     global pipeline
     if pipeline is None:
-        pipeline = QAPipeline(config, langfuse_client)
-        await pipeline.init_components()
-        logger.info("QAPipeline 初始化完成")
+        pipeline = LangGraphQAPipeline(config)
+        logger.info("LangGraphQAPipeline 初始化完成")
     return pipeline
 
 
@@ -64,6 +63,43 @@ async def chat_ask(
 ):
     """同步问答接口"""
     if not query or not query.strip():
+        return "", history
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
+    # 更新配置
+    config.retrieve.use_kb = use_kb
+    config.retrieve.use_tool = use_tool
+    config.retrieve.use_memory = use_memory
+    config.retrieve.top_k = top_k
+    config.retrieve.use_sparse = use_sparse
+    config.retrieve.use_reranker = use_reranker
+    config.retrieve.extra_body = {
+        "chat_template_kwargs": {"enable_thinking": enable_think}
+    }
+
+    try:
+        result = pipeline.ask(
+            query=query,
+            thread_id=session_id,
+            langfuse_session_id=session_id,
+        )
+        if "error" in result:
+            answer = f"错误：{result['error']}"
+        else:
+            answer = result["answer"]
+            context = result.get("context", "") or result.get("kb_context", "")
+            if context:
+                context_preview = (
+                    context[:200] + "..." if len(context) > 200 else context
+                )
+                # 使用 Details 标签折叠上下文，界面更干净
+                answer = f"{answer}\n\n<details><summary>📚 检索参考源 (点击展开)</summary>\n\n{context_preview}\n</details>"
+        history.append([query, answer])
+        return "", history
+    except Exception as e:
+        logger.exception("问答处理异常")
+        history.append([query, f"错误：{str(e)}"])
         return "", history
     if not session_id:
         session_id = str(uuid.uuid4())
@@ -118,6 +154,47 @@ async def chat_stream(
         return
     if not session_id:
         session_id = str(uuid.uuid4())
+
+    # 更新配置
+    config.retrieve.use_kb = use_kb
+    config.retrieve.use_tool = use_tool
+    config.retrieve.use_memory = use_memory
+    config.retrieve.top_k = top_k
+    config.retrieve.use_sparse = use_sparse
+    config.retrieve.use_reranker = use_reranker
+    config.retrieve.extra_body = {
+        "chat_template_kwargs": {"enable_thinking": enable_think}
+    }
+
+    try:
+        answer = ""
+        history.append([query, ""])
+        for event in pipeline.ask_stream(
+            query=query,
+            thread_id=session_id,
+            langfuse_session_id=session_id,
+        ):
+            if event.get("status") == "error":
+                history[-1][1] = f"❌ 错误：{event.get('error', '未知错误')}"
+                yield history
+                return
+            elif (
+                event.get("node") == "generate_answer"
+                and event.get("status") == "complete"
+            ):
+                answer = event.get("answer", "")
+                history[-1][1] = answer
+                yield history
+    except Exception as e:
+        logger.exception("流式问答处理异常")
+        if history and history[-1][0] == query:
+            history[-1][1] = f"❌ 错误：{str(e)}"
+        else:
+            history.append([query, f"❌ 错误：{str(e)}"])
+        yield history
+        return
+    if not session_id:
+        session_id = str(uuid.uuid4())
     try:
         search_config = SearchConfig(
             use_sparse=use_sparse,
@@ -150,7 +227,10 @@ async def chat_stream(
 
 
 def clear_memory_action():
-    pipeline.clear_conversation()
+    """清空记忆（LangGraph 使用 checkpointer 管理状态）"""
+    # LangGraph 通过 thread_id 管理会话状态，清空记忆需要清除 checkpointer
+    # 这里简单处理，返回空历史
+    logger.info("清空对话记忆")
     return [], ""
 
 

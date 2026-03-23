@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-@Time ： 2025/11/19 17:47
-@Auth ： 吕鑫
-@File ：retrieve_config.py
-@IDE ：PyCharm
+@Time：2025/11/19 17:47
+@Auth：吕鑫
+@File：retrieve_config.py
+@IDE：PyCharm
 """
 
 from typing import Any, Dict, List, Optional
@@ -33,7 +33,10 @@ class SearchConfig(BaseModel):
     # 知识库
     use_kb: bool = False
     use_contextualize_embedding: bool = False
-    kb_path: str = Field("../data/knowledge_db/psychology")
+    kb_path: str = Field(
+        default="data/knowledge_db/psychology",
+        description="知识库路径，可从环境变量 RETRIEVE__KB_PATH 加载",
+    )
 
     max_context_length: int = Field(300000, ge=1)
 
