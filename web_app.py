@@ -16,7 +16,6 @@ from langfuse import get_client
 from src.cores.pipeline_langgraph import LangGraphQAPipeline
 from src.configs.config import AppConfig
 from src.configs.logger_config import setup_logger
-from src.configs.retrieve_config import SearchConfig
 
 logger = setup_logger(__name__)
 
@@ -37,15 +36,6 @@ except Exception as e:
     langfuse_client = None
 
 pipeline: Optional[LangGraphQAPipeline] = None
-
-
-async def init_rag_client():
-    """懒初始化 RAG Pipeline"""
-    global pipeline
-    if pipeline is None:
-        pipeline = LangGraphQAPipeline(config)
-        logger.info("LangGraphQAPipeline 初始化完成")
-    return pipeline
 
 
 async def chat_ask(
@@ -134,39 +124,6 @@ async def chat_ask(
     except Exception as e:
         logger.exception("问答处理异常")
         history.append([query, f"错误：{str(e)}"])
-        return "", history
-    if not session_id:
-        session_id = str(uuid.uuid4())
-
-    search_config = SearchConfig(
-        use_sparse=use_sparse,
-        use_reranker=use_reranker,
-        use_kb=use_kb,
-        use_memory=use_memory,
-        use_tool=use_tool,
-        top_k=top_k,
-        extra_body={"chat_template_kwargs": {"enable_thinking": enable_think}},
-        session_id=session_id,
-    )
-    try:
-        result = await pipeline.ask(query=query, config=search_config)
-        if "error" in result:
-            answer = f"错误: {result['error']}"
-        else:
-            answer = result["answer"]
-            if result.get("context"):
-                context_preview = (
-                    result["context"][:200] + "..."
-                    if len(result["context"]) > 200
-                    else result["context"]
-                )
-                # 使用 Details 标签折叠上下文，界面更干净
-                answer = f"{answer}\n\n<details><summary>📚 检索参考源 (点击展开)</summary>\n\n{context_preview}\n</details>"
-        history.append([query, answer])
-        return "", history
-    except Exception as e:
-        logger.exception("问答处理异常")
-        history.append([query, f"错误: {str(e)}"])
         return "", history
 
 
@@ -267,37 +224,6 @@ async def chat_stream(
             history.append([query, f"❌ 错误：{str(e)}"])
         yield history
         return
-    if not session_id:
-        session_id = str(uuid.uuid4())
-    try:
-        search_config = SearchConfig(
-            use_sparse=use_sparse,
-            use_reranker=use_reranker,
-            use_kb=use_kb,
-            use_memory=use_memory,
-            use_tool=use_tool,
-            top_k=top_k,
-            extra_body={"chat_template_kwargs": {"enable_thinking": enable_think}},
-            session_id=session_id,
-        )
-        answer = ""
-        history.append([query, ""])
-        async for chunk in pipeline.ask_stream(query, config=search_config):
-            if "error" in chunk:
-                history[-1][1] = f"❌ 错误: {chunk['error']}"
-                yield history
-                return
-            elif "delta" in chunk:
-                answer += chunk["delta"]
-                history[-1][1] = answer
-                yield history
-    except Exception as e:
-        logger.exception("流式问答处理异常")
-        if history and history[-1][0] == query:
-            history[-1][1] = f"❌ 错误: {str(e)}"
-        else:
-            history.append([query, f"❌ 错误: {str(e)}"])
-        yield history
 
 
 def clear_memory_action() -> Tuple[list, str]:

@@ -94,6 +94,7 @@ class AppConfig(BaseSettings):
         """配置加载后处理：加载.env 文件和环境变量并转换路径"""
         self._load_env_vars()
         self._resolve_paths()
+        self._validate_paths()
 
     def _load_env_vars(self):
         """统一加载配置：先加载.env 文件，再加载系统环境变量（覆盖.env）"""
@@ -202,3 +203,20 @@ class AppConfig(BaseSettings):
         # 知识库路径
         if self.retrieve.kb_path and not Path(self.retrieve.kb_path).is_absolute():
             self.retrieve.kb_path = str((BASE_DIR / self.retrieve.kb_path).resolve())
+
+    def _validate_paths(self):
+        """验证所有路径配置是否存在"""
+        from src.configs.logger_config import setup_logger
+
+        logger = setup_logger(__name__)
+
+        path_configs = [
+            ("Rerank 模型路径", self.reranker.rerank_model_path),
+            ("BM25 模型目录", self.bm25.bm25_model_dir),
+            ("Milvus 数据库路径", self.milvus.vector_db_uri),
+            ("知识库路径", self.retrieve.kb_path),
+        ]
+
+        for name, path in path_configs:
+            if path and not Path(path).exists():
+                logger.warning(f"{name} 不存在：{path}")

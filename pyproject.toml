@@ -5,38 +5,39 @@ description = "RAGentic - Enterprise RAG-based Intelligent Q&A System"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "redisvl",
-    "mem0ai",
+    # Redis & Memory
+    "redisvl>=0.8.0,<0.9.0",
+    "mem0ai>=0.1.0,<0.2.0",
     # 核心 LLM 框架
-    "langchain",
-    "langchain-core",
-    "langchain-community",
-    "langchain-openai",
-    "langchain-mcp-adapters",
-    "langgraph",
+    "langchain>=0.3.0,<0.4.0",
+    "langchain-core>=0.3.0,<0.4.0",
+    "langchain-community>=0.3.0,<0.4.0",
+    "langchain-openai>=0.2.0,<0.3.0",
+    "langchain-mcp-adapters>=0.1.0,<0.2.0",
+    "langgraph>=0.2.0,<0.3.0",
     # OpenAI & API
-    "openai",
-    "langfuse",
+    "openai>=1.50.0,<2.0.0",
+    "langfuse>=2.50.0,<3.0.0",
     # MCP 相关
-    "fastmcp",
-    "mcp == 1.14.1",
-    "a2a-sdk",
+    "fastmcp>=0.1.0,<0.2.0",
+    "mcp==1.14.1",
+    "a2a-sdk>=0.2.0a1",
     # 向量数据库 & 嵌入
-    "pymilvus[milvus-lite,model]",
-    "sentence-transformers",
+    "pymilvus[milvus-lite,model]>=2.4.0,<3.0.0",
+    "sentence-transformers>=3.0.0,<4.0.0",
     # 基础工具
-    "numpy",
-    "tiktoken",
-    "lxml",
+    "numpy>=1.24.0,<3.0.0",
+    "tiktoken>=0.7.0,<0.8.0",
+    "lxml>=5.0.0,<6.0.0",
     # 评估指标
-    "ragas",
-    "rouge",
-    "bert-score",
-    "jieba>=0.42.1",
-    "nltk>=3.9.2",
+    "ragas>=0.2.0,<0.3.0",
+    "rouge>=1.0.0,<2.0.0",
+    "bert-score>=0.3.0,<0.4.0",
+    "jieba>=0.42.1,<0.43.0",
+    "nltk>=3.9.0,<4.0.0",
     # Web 界面
-    "gradio",
-    "chainlit>=2.10.0",
+    "gradio>=5.0.0,<6.0.0",
+    "chainlit>=2.10.0,<3.0.0",
 ]
 
 [[tool.uv.index]]
