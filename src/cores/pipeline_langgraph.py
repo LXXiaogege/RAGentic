@@ -11,14 +11,16 @@
 
 import asyncio
 import concurrent.futures
-from typing import Annotated, Any, Dict, Generator, List, Optional
+import time
+from functools import wraps
+from typing import Annotated, Any, Callable, Dict, Generator, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages.base import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langfuse import Langfuse
-from langfuse.langchain import CallbackHandler
+from langfuse.callback import CallbackHandler
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph, add_messages
 from pydantic import BaseModel
@@ -33,6 +35,20 @@ from src.models.embedding import TextEmbedding
 from src.models.llm import LLMWrapper
 
 logger = setup_logger(__name__)
+
+
+def timing_decorator(func: Callable) -> Callable:
+    """性能监控装饰器 - 记录节点执行时间"""
+
+    @wraps(func)
+    def wrapper(self, state: QAState) -> QAState:
+        start = time.time()
+        result = func(self, state)
+        duration = time.time() - start
+        self.logger.info(f"{func.__name__} 耗时：{duration:.3f}s")
+        return result
+
+    return wrapper
 
 
 class QAState(BaseModel):
@@ -132,6 +148,7 @@ class LangGraphQAPipeline:
 
         # 初始化 Langfuse 客户端
         self.langfuse_client = None
+        self.langfuse_handler = None
         if self.config.langfuse.secret_key:
             try:
                 self.langfuse_client = Langfuse(
@@ -248,6 +265,7 @@ class LangGraphQAPipeline:
         pass
 
     # =================== 节点实现 ===================
+    @timing_decorator
     def _parse_query(self, state: QAState) -> QAState:
         """解析查询，设置默认参数"""
         try:
@@ -271,11 +289,8 @@ class LangGraphQAPipeline:
             self.logger.exception(f"解析查询失败：{e}")
             state.error = f"解析查询失败：{str(e)}"
             return state
-        except Exception as e:
-            self.logger.error(f"解析查询失败: {e}")
-            state.error = f"解析查询失败: {str(e)}"
-            return state
 
+    @timing_decorator
     def _transform_query(self, state: QAState) -> QAState:
         """查询转换"""
         try:
@@ -297,17 +312,13 @@ class LangGraphQAPipeline:
             state.error = f"查询转换失败：{str(e)}"
             return state
 
-        except Exception as e:
-            self.logger.error(f"查询转换失败: {e}")
-            state.error = f"查询转换失败: {str(e)}"
-            return state
-
     def _check_retrieve_knowledge(self, state: QAState) -> QAState:
         return state
 
     def _check_call_tools(self, state: QAState) -> QAState:
         return state
 
+    @timing_decorator
     def _retrieve_knowledge(self, state: QAState) -> QAState:
         """知识库检索"""
         try:
@@ -318,40 +329,8 @@ class LangGraphQAPipeline:
             query = getattr(state, "transformed_query", "") or state.original_query
             self.logger.info(f"开始知识库检索：{query}")
 
-            # 选择检索方法
-            if (
-                self.config.retrieve.use_rewrite
-                and self.config.retrieve.rewrite_mode == "hyde"
-            ):
-                results = asyncio.run(
-                    self.query_transformer.hyde_search(
-                        query, self.config.retrieve.search_config
-                    )
-                )
-            else:
-                results = asyncio.run(
-                    self.db_connection_manager.asearch(
-                        query, self.config.retrieve.search_config
-                    )
-                )
-
-            # 处理检索结果
-            if not results:
-                state.kb_context = "未检索到相关知识。"
-                self.logger.warning("知识库检索未返回结果")
-            else:
-                valid_results = [doc for doc in results if doc and doc.get("text")]
-                if not valid_results:
-                    state.kb_context = "未检索到有效知识。"
-                else:
-                    kb_context = "\n".join(
-                        [
-                            f"【文档{i + 1}】{doc['text']}"
-                            for i, doc in enumerate(valid_results)
-                        ]
-                    )
-                    state.kb_context = f"【知识库检索内容】\n{kb_context}"
-                self.logger.info(f"知识库检索返回 {len(results)} 条结果")
+            results = self._perform_search(query)
+            state.kb_context = self._format_results(results)
 
             return state
 
@@ -360,6 +339,41 @@ class LangGraphQAPipeline:
             state.error = f"知识库检索失败：{str(e)}"
             return state
 
+    def _perform_search(self, query: str) -> list[dict]:
+        """执行检索 - 根据配置选择 HyDE 或标准检索"""
+        if (
+            self.config.retrieve.use_rewrite
+            and self.config.retrieve.rewrite_mode == "hyde"
+        ):
+            return asyncio.run(
+                self.query_transformer.hyde_search(
+                    query, self.config.retrieve.search_config
+                )
+            )
+        else:
+            return asyncio.run(
+                self.db_connection_manager.asearch(
+                    query, self.config.retrieve.search_config
+                )
+            )
+
+    def _format_results(self, results: list[dict]) -> str:
+        """格式化检索结果"""
+        if not results:
+            self.logger.warning("知识库检索未返回结果")
+            return "未检索到相关知识。"
+
+        valid_results = [doc for doc in results if doc and doc.get("text")]
+        if not valid_results:
+            return "未检索到有效知识。"
+
+        kb_context = "\n".join(
+            [f"【文档{i + 1}】{doc['text']}" for i, doc in enumerate(valid_results)]
+        )
+        self.logger.info(f"知识库检索返回 {len(results)} 条结果")
+        return f"【知识库检索内容】\n{kb_context}"
+
+    @timing_decorator
     def _call_tools(self, state: QAState) -> QAState:
         """调用外部工具"""
         try:
@@ -416,32 +430,7 @@ class LangGraphQAPipeline:
             state.error = f"构建上下文失败：{str(e)}"
             return state
 
-    def _build_context(self, state: QAState) -> QAState:
-        """构建最终上下文"""
-        try:
-            self.logger.info("构建最终上下文")
-
-            context_parts = []
-
-            # 添加工具结果
-            if state.tool_context:
-                context_parts.append(state.tool_context)
-
-            # 添加知识库内容
-            if state.kb_context:
-                context_parts.append(state.kb_context)
-
-            # 拼接最终上下文
-            state.final_context = "\n\n".join(context_parts)
-            self.logger.info(f"上下文构建完成，长度: {len(state.final_context)}")
-
-            return state
-
-        except Exception as e:
-            self.logger.error(f"构建上下文失败: {e}")
-            state.error = f"构建上下文失败: {str(e)}"
-            return state
-
+    @timing_decorator
     def _generate_answer(self, state: QAState) -> QAState:
         """生成答案"""
         try:
@@ -481,6 +470,7 @@ class LangGraphQAPipeline:
             state.error = f"生成答案失败：{str(e)}"
             return state
 
+    @timing_decorator
     def _update_memory(self, state: QAState) -> QAState:
         """更新记忆"""
         try:
@@ -494,7 +484,7 @@ class LangGraphQAPipeline:
             state.error = f"更新记忆失败：{str(e)}"
             return state
 
-
+    @timing_decorator
     def _handle_error(self, state: QAState) -> QAState:
         """处理错误"""
         error_msg = state.error or "未知错误"
@@ -570,7 +560,8 @@ class LangGraphQAPipeline:
         if updates:
             for k, v in updates.items():
                 self.logger.info(f"Langfuse更新当前追踪{k}：{v}")
-            self.langfuse_client.update_current_trace(**updates)
+            if self.langfuse_client:
+                self.langfuse_client.update_current_trace(**updates)
 
     # =================== 外部接口 ===================
 
@@ -646,6 +637,8 @@ class LangGraphQAPipeline:
 
         try:
             for event in self.graph.stream(initial_state_object, config):
+                if not event:
+                    continue
                 node_name = list(event.keys())[0]
                 node_state = event[node_name]
 

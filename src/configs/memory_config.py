@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from mem0.configs.base import (
     LlmConfig,
     VectorStoreConfig,
-    RerankerConfig,
     GraphStoreConfig,
     EmbedderConfig,
 )
@@ -27,9 +26,6 @@ class Mem0Config(BaseModel):
     )
     embedder: EmbedderConfig = Field(
         default_factory=EmbedderConfig, description="嵌入模型配置"
-    )
-    reranker: RerankerConfig = Field(
-        default_factory=RerankerConfig, description="reranker 配置"
     )
     graph_store: GraphStoreConfig = Field(
         default_factory=GraphStoreConfig, description="图数据库配置"

@@ -23,6 +23,13 @@ class Mem0Manager:
         self.m: Optional[AsyncMemory] = None
         self.default_user_id = user_id
 
+    def _ensure_initialized(self):
+        """确保 Memory 客户端已初始化"""
+        if self.m is None:
+            raise RuntimeError(
+                "Memory 客户端尚未初始化，请先调用 await init_memory_client()"
+            )
+
     async def init_memory_client(self):
         self.m = await AsyncMemory.from_config(self.config)
         await self.ensure_collection()
@@ -79,6 +86,7 @@ class Mem0Manager:
         Returns:
             dict: 包含添加结果的字典 (例如 {"results": [...]})
         """
+        self._ensure_initialized()
         return await self.m.add(
             messages=messages,
             user_id=self._get_user_id(user_id),
@@ -94,6 +102,7 @@ class Mem0Manager:
         """
         获取单条记忆详情
         """
+        self._ensure_initialized()
         return await self.m.get(memory_id)
 
     async def get_all(
@@ -117,6 +126,7 @@ class Mem0Manager:
         Returns:
             List: 记忆条目列表 (直接返回 results 列表)
         """
+        self._ensure_initialized()
         res = await self.m.get_all(
             user_id=self._get_user_id(user_id),
             agent_id=agent_id,
@@ -134,12 +144,14 @@ class Mem0Manager:
             memory_id: 记忆ID
             data: 新的文本内容 (对应 mem0 update 方法的 data 参数)
         """
+        self._ensure_initialized()
         return await self.m.update(memory_id=memory_id, data=data)
 
     async def delete(self, memory_id: str) -> Dict[str, Any]:
         """
         删除某条记忆
         """
+        self._ensure_initialized()
         return await self.m.delete(memory_id=memory_id)
 
     async def delete_all(
@@ -156,6 +168,7 @@ class Mem0Manager:
             agent_id: 代理ID
             run_id: 运行ID
         """
+        self._ensure_initialized()
         return await self.m.delete_all(
             user_id=self._get_user_id(user_id),
             agent_id=agent_id,
@@ -166,12 +179,14 @@ class Mem0Manager:
         """
         获取某条记忆的变更历史
         """
+        self._ensure_initialized()
         return await self.m.history(memory_id=memory_id)
 
     async def reset(self):
         """
         重置记忆存储 (删除向量库集合，重置数据库)
         """
+        self._ensure_initialized()
         await self.m.reset()
 
     async def search(
@@ -199,6 +214,7 @@ class Mem0Manager:
         Returns:
             dict: 搜索结果，包含 "results" 键
         """
+        self._ensure_initialized()
         return await self.m.search(
             query=query,
             user_id=self._get_user_id(user_id),

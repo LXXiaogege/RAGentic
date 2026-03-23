@@ -13,7 +13,7 @@ import re
 import json
 from src.configs.evaluate_config import EvaluationConfig
 from src.configs.logger_config import setup_logger
-from langfuse import observe
+from langfuse.decorators import observe
 
 from src.configs.retrieve_config import SearchConfig
 

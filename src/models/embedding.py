@@ -8,7 +8,7 @@
 
 from typing import Any, Dict, List, Optional, Union, cast
 
-from langfuse import observe
+from langfuse.decorators import observe
 from langfuse.openai import AsyncOpenAI
 from redisvl.extensions.cache.embeddings import EmbeddingsCache
 
@@ -125,8 +125,12 @@ class TextEmbedding:
             self.logger.debug("所有文本均命中缓存，无需调用 API。")
 
         if None in final_results:
+            failed_count = final_results.count(None)
             self.logger.warning(
-                f"部分文本嵌入失败，{final_results.count(None)}/{len(text)} 个文本未生成嵌入向量"
+                f"部分文本嵌入失败，{failed_count}/{len(text)} 个文本未生成嵌入向量"
+            )
+            raise ValueError(
+                f"嵌入向量生成失败：{failed_count}/{len(text)} 个文本未能生成向量"
             )
 
         return cast(List[List[float]], final_results)

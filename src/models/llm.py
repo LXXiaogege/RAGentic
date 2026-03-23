@@ -19,7 +19,7 @@ from langchain_core.messages import (
     FunctionMessage,
     ToolMessage,
 )
-from langfuse import observe
+from langfuse.decorators import observe
 
 logger = setup_logger(__name__)
 
@@ -138,6 +138,8 @@ class LLMWrapper:
         )
         if return_raw or stream:
             return response  # 返回完整响应，适合高级用法
+        if not response.choices or response.choices[0].message.content is None:
+            raise ValueError("LLM 返回了空的 choices 或 content，请检查模型服务")
         return response.choices[0].message.content  # 默认解析出content
 
     async def achat(
@@ -157,4 +159,6 @@ class LLMWrapper:
         )
         if return_raw or stream:
             return response
+        if not response.choices or response.choices[0].message.content is None:
+            raise ValueError("LLM 返回了空的 choices 或 content，请检查模型服务")
         return response.choices[0].message.content

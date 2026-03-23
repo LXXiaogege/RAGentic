@@ -12,12 +12,12 @@ import os
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
-from langfuse import observe
+from langfuse.decorators import observe
 from pymilvus import AnnSearchRequest, RRFRanker
 try:
     # pymilvus 在不同版本里该子模块可能不存在
     from pymilvus.model.reranker import CrossEncoderRerankFunction  # type: ignore
-except Exception:  # pragma: no cover
+except (ImportError, ModuleNotFoundError):  # pragma: no cover
     CrossEncoderRerankFunction = None
 
 try:
@@ -25,7 +25,7 @@ try:
     from pymilvus.model.sparse.bm25.tokenizers import (  # type: ignore
         build_default_analyzer,
     )
-except Exception:  # pragma: no cover
+except (ImportError, ModuleNotFoundError):  # pragma: no cover
     BM25EmbeddingFunction = None
     build_default_analyzer = None
 
@@ -214,6 +214,10 @@ class MilvusDataService:
         update_ids = [r["id"] for r in records]
         # 备份原始数据
         backup_data = self._backup_records(update_ids)
+        if not backup_data:
+            raise RuntimeError(
+                f"备份记录失败（返回空），中止更新操作以防止数据丢失。涉及 ID：{update_ids}"
+            )
         try:
             self.client.delete(
                 collection_name=self.milvus_config.collection_name, ids=update_ids
@@ -342,6 +346,9 @@ class MilvusDataService:
 
         # 统一输出格式
         results = []
+        if not docs or not docs[0]:
+            self.logger.warning("搜索未返回任何结果")
+            return results
         for hit in docs[0][: config.top_k]:
             entity = hit["entity"]
             results.append(

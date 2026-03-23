@@ -8,17 +8,27 @@
 
 import os
 import uuid
+from copy import deepcopy
 from typing import AsyncGenerator, Optional, Tuple
 
 import gradio as gr
-from langfuse import get_client
+# 速率限制暂时禁用（需要 Gradio 集成支持）
+# from slowapi import Limiter
+# from slowapi.util import get_remote_address
+
+from langfuse import Langfuse
+
+from src.utils.security import SecurityManager
 
 from src.cores.pipeline_langgraph import LangGraphQAPipeline
 from src.configs.config import AppConfig
 from src.configs.logger_config import setup_logger
-from src.configs.retrieve_config import SearchConfig
 
 logger = setup_logger(__name__)
+
+# ================= 安全初始化 =================
+security_manager = SecurityManager()
+# limiter = Limiter(key_func=get_remote_address)  # 暂时禁用
 
 # ================= 配置初始化 =================
 config = AppConfig()
@@ -30,7 +40,7 @@ os.environ["OPENAI_API_KEY"] = config.llm.api_key
 os.environ["OPENAI_API_BASE"] = config.llm.base_url
 
 try:
-    langfuse_client = get_client()
+    langfuse_client = Langfuse()
     logger.info("Langfuse 客户端初始化成功")
 except Exception as e:
     logger.warning(f"Langfuse 客户端初始化失败：{e}")
@@ -39,15 +49,7 @@ except Exception as e:
 pipeline: Optional[LangGraphQAPipeline] = None
 
 
-async def init_rag_client():
-    """懒初始化 RAG Pipeline"""
-    global pipeline
-    if pipeline is None:
-        pipeline = LangGraphQAPipeline(config)
-        logger.info("LangGraphQAPipeline 初始化完成")
-    return pipeline
-
-
+# @limiter.limit("10/minute")  # 暂时禁用
 async def chat_ask(
     query: str,
     use_kb: bool,
@@ -61,18 +63,25 @@ async def chat_ask(
     history: list[list[str]],
 ) -> Tuple[str, list[list[str]]]:
     """同步问答接口"""
-    if not query or not query.strip():
-        return "", history
+    # 验证和清理输入
+    is_valid, error_msg = SecurityManager.validate_query(query)
+    if not is_valid:
+        logger.warning(f"无效查询：{error_msg}")
+        return f"❌ 错误：{error_msg}", history
+
+    query = SecurityManager.sanitize_input(query)
+
     if not session_id:
         session_id = str(uuid.uuid4())
 
-    config.retrieve.use_kb = use_kb
-    config.retrieve.use_tool = use_tool
-    config.retrieve.use_memory = use_memory
-    config.retrieve.top_k = top_k
-    config.retrieve.use_sparse = use_sparse
-    config.retrieve.use_reranker = use_reranker
-    config.retrieve.extra_body = {
+    req_config = deepcopy(config)
+    req_config.retrieve.use_kb = use_kb
+    req_config.retrieve.use_tool = use_tool
+    req_config.retrieve.use_memory = use_memory
+    req_config.retrieve.top_k = top_k
+    req_config.retrieve.use_sparse = use_sparse
+    req_config.retrieve.use_reranker = use_reranker
+    req_config.retrieve.extra_body = {
         "chat_template_kwargs": {"enable_thinking": enable_think}
     }
 
@@ -98,78 +107,9 @@ async def chat_ask(
         logger.exception("问答处理异常")
         history.append([query, f"错误：{str(e)}"])
         return "", history
-    if not session_id:
-        session_id = str(uuid.uuid4())
-
-    # 更新配置
-    config.retrieve.use_kb = use_kb
-    config.retrieve.use_tool = use_tool
-    config.retrieve.use_memory = use_memory
-    config.retrieve.top_k = top_k
-    config.retrieve.use_sparse = use_sparse
-    config.retrieve.use_reranker = use_reranker
-    config.retrieve.extra_body = {
-        "chat_template_kwargs": {"enable_thinking": enable_think}
-    }
-
-    try:
-        result = pipeline.ask(
-            query=query,
-            thread_id=session_id,
-            langfuse_session_id=session_id,
-        )
-        if "error" in result:
-            answer = f"错误：{result['error']}"
-        else:
-            answer = result["answer"]
-            context = result.get("context", "") or result.get("kb_context", "")
-            if context:
-                context_preview = (
-                    context[:200] + "..." if len(context) > 200 else context
-                )
-                # 使用 Details 标签折叠上下文，界面更干净
-                answer = f"{answer}\n\n<details><summary>📚 检索参考源 (点击展开)</summary>\n\n{context_preview}\n</details>"
-        history.append([query, answer])
-        return "", history
-    except Exception as e:
-        logger.exception("问答处理异常")
-        history.append([query, f"错误：{str(e)}"])
-        return "", history
-    if not session_id:
-        session_id = str(uuid.uuid4())
-
-    search_config = SearchConfig(
-        use_sparse=use_sparse,
-        use_reranker=use_reranker,
-        use_kb=use_kb,
-        use_memory=use_memory,
-        use_tool=use_tool,
-        top_k=top_k,
-        extra_body={"chat_template_kwargs": {"enable_thinking": enable_think}},
-        session_id=session_id,
-    )
-    try:
-        result = await pipeline.ask(query=query, config=search_config)
-        if "error" in result:
-            answer = f"错误: {result['error']}"
-        else:
-            answer = result["answer"]
-            if result.get("context"):
-                context_preview = (
-                    result["context"][:200] + "..."
-                    if len(result["context"]) > 200
-                    else result["context"]
-                )
-                # 使用 Details 标签折叠上下文，界面更干净
-                answer = f"{answer}\n\n<details><summary>📚 检索参考源 (点击展开)</summary>\n\n{context_preview}\n</details>"
-        history.append([query, answer])
-        return "", history
-    except Exception as e:
-        logger.exception("问答处理异常")
-        history.append([query, f"错误: {str(e)}"])
-        return "", history
 
 
+# @limiter.limit("10/minute")  # 暂时禁用
 async def chat_stream(
     query: str,
     use_kb: bool,
@@ -183,19 +123,27 @@ async def chat_stream(
     history: list[list[str]],
 ) -> AsyncGenerator[list[list[str]], None]:
     """流式问答接口"""
-    if not query or not query.strip():
+    # 验证和清理输入
+    is_valid, error_msg = SecurityManager.validate_query(query)
+    if not is_valid:
+        logger.warning(f"无效查询：{error_msg}")
+        history.append([query, f"❌ 错误：{error_msg}"])
         yield history
         return
+
+    query = SecurityManager.sanitize_input(query)
+
     if not session_id:
         session_id = str(uuid.uuid4())
 
-    config.retrieve.use_kb = use_kb
-    config.retrieve.use_tool = use_tool
-    config.retrieve.use_memory = use_memory
-    config.retrieve.top_k = top_k
-    config.retrieve.use_sparse = use_sparse
-    config.retrieve.use_reranker = use_reranker
-    config.retrieve.extra_body = {
+    req_config = deepcopy(config)
+    req_config.retrieve.use_kb = use_kb
+    req_config.retrieve.use_tool = use_tool
+    req_config.retrieve.use_memory = use_memory
+    req_config.retrieve.top_k = top_k
+    req_config.retrieve.use_sparse = use_sparse
+    req_config.retrieve.use_reranker = use_reranker
+    req_config.retrieve.extra_body = {
         "chat_template_kwargs": {"enable_thinking": enable_think}
     }
 
@@ -226,78 +174,6 @@ async def chat_stream(
             history.append([query, f"❌ 错误：{str(e)}"])
         yield history
         return
-    if not session_id:
-        session_id = str(uuid.uuid4())
-
-    # 更新配置
-    config.retrieve.use_kb = use_kb
-    config.retrieve.use_tool = use_tool
-    config.retrieve.use_memory = use_memory
-    config.retrieve.top_k = top_k
-    config.retrieve.use_sparse = use_sparse
-    config.retrieve.use_reranker = use_reranker
-    config.retrieve.extra_body = {
-        "chat_template_kwargs": {"enable_thinking": enable_think}
-    }
-
-    try:
-        answer = ""
-        history.append([query, ""])
-        for event in pipeline.ask_stream(
-            query=query,
-            thread_id=session_id,
-            langfuse_session_id=session_id,
-        ):
-            if event.get("status") == "error":
-                history[-1][1] = f"❌ 错误：{event.get('error', '未知错误')}"
-                yield history
-                return
-            elif (
-                event.get("node") == "generate_answer"
-                and event.get("status") == "complete"
-            ):
-                answer = event.get("answer", "")
-                history[-1][1] = answer
-                yield history
-    except Exception as e:
-        logger.exception("流式问答处理异常")
-        if history and history[-1][0] == query:
-            history[-1][1] = f"❌ 错误：{str(e)}"
-        else:
-            history.append([query, f"❌ 错误：{str(e)}"])
-        yield history
-        return
-    if not session_id:
-        session_id = str(uuid.uuid4())
-    try:
-        search_config = SearchConfig(
-            use_sparse=use_sparse,
-            use_reranker=use_reranker,
-            use_kb=use_kb,
-            use_memory=use_memory,
-            use_tool=use_tool,
-            top_k=top_k,
-            extra_body={"chat_template_kwargs": {"enable_thinking": enable_think}},
-            session_id=session_id,
-        )
-        answer = ""
-        history.append([query, ""])
-        async for chunk in pipeline.ask_stream(query, config=search_config):
-            if "error" in chunk:
-                history[-1][1] = f"❌ 错误: {chunk['error']}"
-                yield history
-                return
-            elif "delta" in chunk:
-                answer += chunk["delta"]
-                history[-1][1] = answer
-                yield history
-    except Exception as e:
-        logger.exception("流式问答处理异常")
-        if history and history[-1][0] == query:
-            history[-1][1] = f"❌ 错误: {str(e)}"
-        else:
-            history.append([query, f"❌ 错误: {str(e)}"])
-        yield history
 
 
 def clear_memory_action() -> Tuple[list, str]:

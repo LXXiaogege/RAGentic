@@ -155,6 +155,11 @@ class QueryTransformer:
 
         try:
             vector = await self.generate_hyde_vector(query)
+            if vector is None:
+                self.logger.warning("HyDE 向量生成返回 None，回退到标准检索")
+                return await self.db_connection_manager.asearch(
+                    query=query, search_config=config
+                )
             docs = await self.db_connection_manager.asearch(
                 query=vector, search_config=config
             )
