@@ -3,6 +3,7 @@
 
 import base64
 import hashlib
+import os
 import re
 from typing import Optional
 
@@ -30,7 +31,8 @@ class SecurityManager:
 
     def _derive_key(self, password: str) -> bytes:
         """从密码派生加密密钥"""
-        salt = b"ragentic_salt_v1"  # 生产环境应该使用随机 salt
+        salt_str = os.environ.get("ENCRYPTION_SALT", "ragentic_salt_v1")
+        salt = salt_str.encode()
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,

@@ -39,6 +39,12 @@ venv.bak/
 .pydevproject
 .settings/
 
+# Claude Code local config
+.claude/
+
+# GitHub Actions workflows (local only)
+.github/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 *.ipynb

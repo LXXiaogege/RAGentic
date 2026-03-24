@@ -70,7 +70,7 @@ class SearchConfig(BaseModel):
 class MessageBuilderConfig(BaseModel):
     templates_dir: str = Field("templates", description="Jinja2 模板目录")
     message_builder_model: str = "gpt-3.5-turbo"
-    message_max_tokens: int = Field(3500000, ge=1)
+    message_max_tokens: int = Field(3500, ge=1)
 
     message_system_prompt_template: str = "{prefix}{context_hint}"
 

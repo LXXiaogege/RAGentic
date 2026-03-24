@@ -550,10 +550,10 @@ with gr.Blocks(title="RAG 智能助手", theme=theme, css=modern_css) as demo:
 
 if __name__ == "__main__":
     demo.launch(
-        server_name="127.0.0.1",
-        server_port=7860,
+        server_name=os.environ.get("APP_HOST", "127.0.0.1"),
+        server_port=int(os.environ.get("APP_PORT", "7860")),
         share=False,
         show_error=True,
-        debug=True,
+        debug=os.environ.get("APP_DEBUG", "false").lower() == "true",
         prevent_thread_lock=True,
     )
