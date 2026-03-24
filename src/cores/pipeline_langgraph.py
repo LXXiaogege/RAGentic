@@ -21,6 +21,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langfuse import Langfuse
 from langfuse.callback import CallbackHandler
+from langfuse.decorators import langfuse_context
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph, add_messages
 from pydantic import BaseModel
@@ -561,7 +562,7 @@ class LangGraphQAPipeline:
             for k, v in updates.items():
                 self.logger.info(f"Langfuse更新当前追踪{k}：{v}")
             if self.langfuse_client:
-                self.langfuse_client.update_current_trace(**updates)
+                langfuse_context.update_current_trace(**updates)
 
     # =================== 外部接口 ===================
 
@@ -642,12 +643,18 @@ class LangGraphQAPipeline:
                 node_name = list(event.keys())[0]
                 node_state = event[node_name]
 
+                # node_state may be a QAState object or a plain dict depending on the node
+                def _get(key, default=None):
+                    if isinstance(node_state, dict):
+                        return node_state.get(key, default)
+                    return getattr(node_state, key, default)
+
                 # 检查错误
-                if node_state.error:
+                if _get("error"):
                     yield {
                         "node": node_name,
                         "status": "error",
-                        "error": node_state.error,
+                        "error": _get("error"),
                     }
                     continue
 
@@ -656,15 +663,15 @@ class LangGraphQAPipeline:
                     "node": node_name,
                     "status": "processing",
                     "state": {
-                        "kb_context": node_state.kb_context,
-                        "tool_context": node_state.tool_context,
-                        "final_context": node_state.final_context,
+                        "kb_context": _get("kb_context"),
+                        "tool_context": _get("tool_context"),
+                        "final_context": _get("final_context"),
                     },
                 }
 
                 # 如果是生成答案节点，实现流式生成
                 if node_name == "generate_answer":
-                    messages = node_state.messages
+                    messages = _get("messages") or []
                     if messages:
                         # 获取最后一条AI消息
                         ai_messages = [
@@ -677,7 +684,7 @@ class LangGraphQAPipeline:
                                 "node": "generate_answer",
                                 "status": "complete",
                                 "answer": ai_messages[-1],
-                                "context": node_state.final_context,
+                                "context": _get("final_context"),
                             }
 
         except Exception as e:
