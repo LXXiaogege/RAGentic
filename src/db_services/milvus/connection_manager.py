@@ -5,14 +5,19 @@
 @File ：connection_manager.py
 @IDE ：PyCharm
 """
+
+from typing import Any, Dict, List, Optional, Union
+
+import numpy as np
 from pymilvus import MilvusClient
-from src.configs.retrieve_config import MilvusConfig, SearchConfig
-from src.db_services.milvus.database_manager import MilvusDBManager
+
+from src.configs.database_config import MilvusConfig
+from src.configs.logger_config import setup_logger
+from src.configs.model_config import BM25Config, RerankConfig
+from src.configs.retrieve_config import SearchConfig
 from src.db_services.milvus.collection_manager import MilvusCollectionManager
 from src.db_services.milvus.data_service import MilvusDataService
-from src.configs.logger_config import setup_logger
-from typing import Union, List, Optional, Dict, Any
-import numpy as np
+from src.db_services.milvus.database_manager import MilvusDBManager
 
 logger = setup_logger(__name__)
 
@@ -22,7 +27,15 @@ class MilvusConnectionManager:
     统一的 Milvus 数据库入口类
     """
 
-    def __init__(self, embeddings, text_splitter, milvus_config: MilvusConfig, search_config: SearchConfig):
+    def __init__(
+        self,
+        embeddings,
+        text_splitter,
+        milvus_config: MilvusConfig,
+        search_config: SearchConfig,
+        rerank_config: RerankConfig,
+        bm25_config: BM25Config,
+    ):
         """
         初始化 Milvus 数据库
 
@@ -33,21 +46,33 @@ class MilvusConnectionManager:
         """
         self.logger = logger
         self.milvus_config = milvus_config
+        self.rerank_config = rerank_config
+        self.bm25_config = bm25_config
         self.search_config = search_config
         self.embeddings = embeddings
         self.text_splitter = text_splitter
 
         # 1. 创建 Milvus 客户端
         self.logger.info("初始化 Milvus 客户端...")
-        if self.milvus_config.milvus_mode == "local":
-            self.client = MilvusClient(self.milvus_config.vector_db_uri)
-        else:
-            self.client = MilvusClient(
-                uri=self.milvus_config.vector_db_uri,
-                user=self.milvus_config.db_user,
-                password=self.milvus_config.db_password,
-                db_name=self.milvus_config.db_name
-            )
+        try:
+            if self.milvus_config.milvus_mode == "local":
+                self.client = MilvusClient(self.milvus_config.vector_db_uri)
+            else:
+                self.client = MilvusClient(
+                    uri=self.milvus_config.vector_db_uri,
+                    user=self.milvus_config.db_user,
+                    password=self.milvus_config.db_password,
+                    db_name=self.milvus_config.db_name,
+                )
+        except Exception as e:
+            # pymilvus 使用 milvus-lite（本地 sqlite 模式）时通常需要额外可选依赖
+            if "milvus-lite" in str(e):
+                raise RuntimeError(
+                    "Milvus 本地连接失败：缺少 `milvus_lite` 依赖。"
+                    "请执行：`pip install 'pymilvus[milvus_lite]'`，"
+                    "或将配置 `milvus_mode` 改为 `remote`（并确保远端 Milvus 可用）。"
+                ) from e
+            raise
 
         # 2. 初始化数据库管理器
         self.logger.info("初始化数据库管理器...")
@@ -74,6 +99,8 @@ class MilvusConnectionManager:
             embeddings=self.embeddings,
             text_splitter=self.text_splitter,
             config=self.milvus_config,
+            rerank_config=self.rerank_config,
+            bm25_config=self.bm25_config,
         )
 
         # 保持向后兼容的属性
@@ -133,13 +160,21 @@ class MilvusConnectionManager:
     def build_collection(self):
         """构建集合（如果不存在则创建）"""
         if not self.has_collection(self.milvus_config.collection_name):
-            self.logger.info(f"集合 {self.milvus_config.collection_name} 不存在，开始创建...")
+            self.logger.info(
+                f"集合 {self.milvus_config.collection_name} 不存在，开始创建..."
+            )
             schema = self._create_default_schema()
-            self.collection_manager.create_collection(self.milvus_config.collection_name, schema)
+            self.collection_manager.create_collection(
+                self.milvus_config.collection_name, schema
+            )
             self.collection_manager.load(self.milvus_config.collection_name)
-            self.logger.info(f"集合 {self.milvus_config.collection_name} 创建并加载完成")
+            self.logger.info(
+                f"集合 {self.milvus_config.collection_name} 创建并加载完成"
+            )
         else:
-            self.logger.info(f"集合 {self.milvus_config.collection_name} 已存在，跳过创建")
+            self.logger.info(
+                f"集合 {self.milvus_config.collection_name} 已存在，跳过创建"
+            )
             self.load_collection(self.milvus_config.collection_name)
 
     def _create_default_schema(self) -> dict:
@@ -152,29 +187,29 @@ class MilvusConnectionManager:
                     "name": "id",
                     "dtype": "VARCHAR",
                     "max_length": 64,
-                    "is_primary": True
+                    "is_primary": True,
                 },
                 {
                     "name": "dense_vec",
                     "dtype": "FLOAT_VECTOR",
-                    "dim": self.milvus_config.vector_dimension
+                    "dim": self.milvus_config.vector_dimension,
                 },
                 {
                     "name": "bm25_vec",
                     "dtype": "SPARSE_FLOAT_VECTOR",
-                    "drop_ratio_build": self.milvus_config.bm25_drop_ratio
+                    "drop_ratio_build": self.bm25_config.bm25_drop_ratio,
                 },
                 {
                     "name": "text",
                     "dtype": "VARCHAR",
-                    "max_length": self.milvus_config.max_text_length
+                    "max_length": self.milvus_config.max_text_length,
                 },
                 {
                     "name": "metadata",
                     "dtype": "VARCHAR",
-                    "max_length": self.milvus_config.max_metadata_length
-                }
-            ]
+                    "max_length": self.milvus_config.max_metadata_length,
+                },
+            ],
         }
 
     # --- Data Level ---
@@ -202,16 +237,18 @@ class MilvusConnectionManager:
         """按条件删除"""
         self.data_service.delete_by_filter(collection_name, filter_condition)
 
-    def add_documents_from_dir(self, data_dir: str):
+    async def add_documents_from_dir(self, data_dir: str):
         """从目录中批量添加或更新文档向量"""
         # 确保集合已创建
         self.build_collection()
         # 添加文档
-        self.data_service.add_documents_from_dir(data_dir)
+        await self.data_service.aadd_documents_from_dir(data_dir)
 
-    def search(self, query: Union[str, List[float], np.array], search_config: SearchConfig) -> List[Dict[str, Any]]:
+    async def asearch(
+        self, query: Union[str, List[float], np.ndarray], search_config: SearchConfig
+    ) -> List[Dict[str, Any]]:
         """
         搜索向量
         """
         self.search_config = search_config if search_config else self.search_config
-        return self.data_service.search(query, self.search_config)
+        return await self.data_service.asearch(query, self.search_config)

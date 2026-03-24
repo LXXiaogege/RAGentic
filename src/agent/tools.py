@@ -10,7 +10,7 @@ from lxml import html
 from typing import Dict, List
 from urllib.parse import urlparse
 from src.configs.logger_config import setup_logger
-from langfuse import observe
+from langfuse.decorators import observe
 
 logger = setup_logger(__name__)
 

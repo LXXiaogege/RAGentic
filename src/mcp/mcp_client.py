@@ -32,8 +32,8 @@ class MCPClient:
             server_script_path: Path to the server script (.py or .js)
         """
         logger.info(f"Attempting to connect to server at: {server_script_path}")
-        is_python = server_script_path.endswith('.py')
-        is_js = server_script_path.endswith('.js')
+        is_python = server_script_path.endswith(".py")
+        is_js = server_script_path.endswith(".js")
         if not (is_python or is_js):
             logger.error("Invalid server script file type")
             raise ValueError("Server script must be a .py or .js file")
@@ -45,8 +45,10 @@ class MCPClient:
             command = shutil.which("uv")
             if not command:
                 logger.error("uv command not found in PATH")
-                raise RuntimeError("uv command not found. Please install uv or add it to PATH")
-            args = ['run', server_script_path]
+                raise RuntimeError(
+                    "uv command not found. Please install uv or add it to PATH"
+                )
+            args = ["run", server_script_path]
             logger.debug(f"Using Python runner: {command} {' '.join(args)}")
 
         elif is_js:
@@ -54,28 +56,34 @@ class MCPClient:
             command = shutil.which("node")
             if not command:
                 logger.error("node command not found in PATH")
-                raise RuntimeError("node command not found. Please install Node.js or add it to PATH")
+                raise RuntimeError(
+                    "node command not found. Please install Node.js or add it to PATH"
+                )
             args = [server_script_path]
             logger.debug(f"Using JavaScript runner: {command} {' '.join(args)}")
 
         logger.debug(f"Using command: {command}")
 
         server_params = StdioServerParameters(
-            command=command,
-            args=['run', server_script_path],
-            env=None
+            command=command, args=["run", server_script_path], env=None
         )
 
         try:
-            stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
+            stdio_transport = await self.exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
             self.stdio, self.write = stdio_transport
-            self.session = await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write))
+            self.session = await self.exit_stack.enter_async_context(
+                ClientSession(self.stdio, self.write)
+            )
             await self.session.initialize()
 
             # List available tools
             response = await self.session.list_tools()
             self.available_tools = response.tools
-            logger.info(f"Successfully connected to server with tools: {[tool.name for tool in self.available_tools]}")
+            logger.info(
+                f"Successfully connected to server with tools: {[tool.name for tool in self.available_tools]}"
+            )
         except (ConnectionError, TimeoutError) as e:
             logger.error(f"Failed to connect to server: {str(e)}")
             raise
@@ -89,8 +97,10 @@ class MCPClient:
                 "function": {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.inputSchema if hasattr(tool, 'inputSchema') else {}
-                }
+                    "parameters": tool.inputSchema
+                    if hasattr(tool, "inputSchema")
+                    else {},
+                },
             }
             openai_tools.append(openai_tool)
         return openai_tools
@@ -98,15 +108,12 @@ class MCPClient:
     async def process_query(self, query: str) -> str:
         """Process a query using openai and available tools"""
         logger.info(f"Processing query: {query}")
-        messages = [
-            {
-                "role": "user",
-                "content": query
-            }
-        ]
+        messages = [{"role": "user", "content": query}]
 
         available_tools = self._convert_mcp_tools_to_openai_format()
-        logger.debug(f"Available tools: {[tool['function']['name'] for tool in available_tools]}")
+        logger.debug(
+            f"Available tools: {[tool['function']['name'] for tool in available_tools]}"
+        )
 
         try:
             response = self.llm.chat(
@@ -114,7 +121,8 @@ class MCPClient:
                 messages=messages,
                 return_raw=True,
                 tools=available_tools,
-                tool_choice='auto'
+                tool_choice="auto",
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             logger.debug("Received response from LLM")
         except Exception as e:
@@ -129,7 +137,7 @@ class MCPClient:
 
         # 并发调用所有工具
         async def call_single_tool(tool_call):
-            if tool_call.type == 'function':
+            if tool_call.type == "function":
                 tool_name = tool_call.function.name
                 tool_args = json.loads(tool_call.function.arguments)
                 logger.info(f"Calling tool: {tool_name} with args: {tool_args}")
@@ -139,11 +147,13 @@ class MCPClient:
                         logger.info(f"Tool {tool_name} executed successfully")
                         if tool_result.content and len(tool_result.content) > 0:
                             content = tool_result.content[0]
-                            if hasattr(content, 'text'):
+                            if hasattr(content, "text"):
                                 return f"[Tool {tool_name} result]: {content.text}"
                             else:
                                 return f"[Tool {tool_name} result]: {str(content)}"
-                        return f"[Tool {tool_name} result]: {tool_result.content[0].text}"
+                        return (
+                            f"[Tool {tool_name} result]: {tool_result.content[0].text}"
+                        )
                     else:
                         logger.error(f"Tool {tool_name} returned an error")
                         return f"[Error calling tool {tool_name}]"
@@ -185,7 +195,13 @@ def _find_project_root():
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 向上查找，直到找到包含常见项目文件的目录
-    project_markers = ['pyproject.toml', 'setup.py', 'requirements.txt', '.git', 'mcp_server.py']
+    project_markers = [
+        "pyproject.toml",
+        "setup.py",
+        "requirements.txt",
+        ".git",
+        "mcp_server.py",
+    ]
 
     while current_dir != os.path.dirname(current_dir):  # 避免到达根目录
         for marker in project_markers:
@@ -229,8 +245,7 @@ if __name__ == "__main__":
     config = AppConfig()
     llm = LLMWrapper(config.llm)
     client = MCPClient(llm)
-    query = '洛杉矶今天天气怎么样？'
-    # query = '今天百度第一条新闻是什么?'
+    query = "洛杉矶今天天气怎么样？"
+    # query = '今天百度第一条新闻是什么？'
     tool_result = asyncio.run(mcp_main(client, query))
-    print(tool_result)
-    pass
+    logger.info(f"工具调用结果：{tool_result}")

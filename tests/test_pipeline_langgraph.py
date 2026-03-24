@@ -2,12 +2,12 @@
 """
 @Time ： 2025/6/8 10:27
 @Auth ： 吕鑫
-@File ：test_pipline_langgraph.py
+@File ：test_pipeline_langgraph.py
 @IDE ：PyCharm
 """
 
 from src.configs.config import AppConfig
-from src.cores.pipline_langgraph import LangGraphQAPipeline
+from src.cores.pipeline_langgraph import LangGraphQAPipeline
 
 """使用示例"""
 # 假设有配置对象
@@ -20,7 +20,7 @@ pipeline = LangGraphQAPipeline(config)
 # pipeline.export_graph()
 
 # 使用tool
-result = pipeline.ask("美国纽约今天天气如何，同时帮我看看百度首页有什么新闻？", use_tools=True)
+result = pipeline.ask("大模型是什么，一句话概括", use_tools=False)
 print(result)
 
 # result = pipeline.ask("你还记得我叫什么嘛？", use_memory=True)

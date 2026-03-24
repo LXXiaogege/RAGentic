@@ -10,7 +10,7 @@ from typing import List, Dict, Optional, Annotated, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph import add_messages
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 import asyncio
@@ -125,7 +125,7 @@ class QA_Agent:
 
         # 查询转换器
         self.query_transformer = QueryTransformer(self.llm_caller, self.message_builder, self.embeddings,
-                                                  self.db_connection_manager, self.config.rewrite)
+                                                  self.db_connection_manager)
 
         # MCP客户端
         self.mcp_client = MCPClient(self.llm_caller)
@@ -404,7 +404,8 @@ class QA_Agent:
                 system_prompt=system_prompt,
                 memory_limit=10
             )
-            answer = self.llm_caller.chat(messages=messages)
+            answer = self.llm_caller.chat(messages=messages,
+                                          extra_body={"chat_template_kwargs": {"enable_thinking": False}})
 
             state["messages"] = state.get("messages", []) + [
                 HumanMessage(content=state["original_query"]),

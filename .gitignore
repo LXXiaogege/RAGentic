@@ -39,6 +39,12 @@ venv.bak/
 .pydevproject
 .settings/
 
+# Claude Code local config
+.claude/
+
+# GitHub Actions workflows (local only)
+.github/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 *.ipynb
@@ -105,6 +111,11 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Chainlit runtime (keep config.toml and chainlit.md, ignore generated files)
+.chainlit/translations/
+.chainlit/*.db
+.chainlit/*.log
 
 # Vector DB
 *.milvus
