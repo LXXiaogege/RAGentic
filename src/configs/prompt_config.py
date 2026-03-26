@@ -63,6 +63,9 @@ class PromptConfig(BaseModel):
         假设的答案：""",
         description="HyDE 提示词",
     )
+
+    skills_dir: str = Field("skills", description="skills md 文件目录")
+
     kb_system_prompt: str = Field(
         """{prefix}你是一个资深知识问答助手，回答时需参考给定的上下文资料。请用中文作答，若无法从资料中获取信息，请如实说明。{context_hint}""",
         description="知识库系统 prompt 模板",

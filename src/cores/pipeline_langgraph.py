@@ -35,6 +35,7 @@ from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.mcp.mcp_client import MCPClient, _find_project_root
 from src.models.embedding import TextEmbedding
 from src.models.llm import LLMWrapper
+from src.skills.skill_manager import SkillManager
 
 logger = setup_logger(__name__)
 
@@ -153,6 +154,9 @@ class LangGraphQAPipeline:
 
         # MCP客户端
         self.mcp_client = MCPClient(self.llm_caller)
+
+        # Skills 管理器
+        self.skill_manager = SkillManager(self.config.prompt.skills_dir)
 
         # 检查点保存器
         self.checkpointer = MemorySaver()
@@ -420,6 +424,9 @@ class LangGraphQAPipeline:
                     if self.config.retrieve.use_kb
                     else self.config.prompt.system_prompt
                 )
+                skills_block = self.skill_manager.get_skills_prompt_block()
+                if skills_block:
+                    system_prompt = system_prompt + "\n\n" + skills_block
                 messages = build_prompt_messages(
                     state,
                     system_prompt=system_prompt,

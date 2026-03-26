@@ -12,6 +12,7 @@ import asyncio
 from fastmcp import FastMCP
 from src.agent.tools import WebSpider
 from src.configs.logger_config import setup_logger
+from src.skills.skill_manager import SkillManager
 
 logger = setup_logger(__name__)
 
@@ -87,6 +88,7 @@ async def weather_get_forecast(latitude: float, longitude: float) -> str:
 
 # ---- Web crawl tool ----
 _web_spider = WebSpider()
+_skill_manager = SkillManager("skills")
 
 
 @main_mcp.tool()
@@ -107,5 +109,21 @@ async def web_crawl(url: str) -> str:
         return f"网页爬取失败: {str(e)}"
 
 
+# ---- Skills tool ----
+@main_mcp.tool()
+def read_skill(name: str) -> str:
+    """读取指定 skill 的完整指令内容。当你判断用户请求匹配某个 skill 时调用此工具，获取指令后严格按照指令执行。
+
+    Args:
+        name: skill 名称，必须是 available_skills 列表中的名称之一
+    """
+    body = _skill_manager.get_skill_body(name)
+    if body is None:
+        available = list(_skill_manager.skills.keys())
+        return f"Skill '{name}' 不存在。可用的 skills：{available}"
+    return body
+
+
 if __name__ == "__main__":
     main_mcp.run()
+
