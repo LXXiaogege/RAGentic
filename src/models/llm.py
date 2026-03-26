@@ -7,6 +7,7 @@
 """
 
 from typing import ClassVar, Dict, List, Type, Union, cast
+import json
 from src.configs.model_config import LLMConfig
 from openai.types.chat import ChatCompletionMessageParam
 from langfuse.openai import OpenAI, AsyncOpenAI
@@ -120,7 +121,23 @@ class LLMWrapper:
             role = self.TYPE_TO_ROLE.get(type(msg))
             if role is None:
                 raise ValueError(f"Unknown message type: {type(msg)}")
-            formatted.append({"role": role, "content": msg.content})
+            d = {"role": role, "content": msg.content or ""}
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                d["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["args"]),
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ]
+                d["content"] = msg.content or None
+            if isinstance(msg, ToolMessage):
+                d["tool_call_id"] = msg.tool_call_id
+            formatted.append(d)
         return formatted
 
     def chat(

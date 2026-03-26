@@ -150,8 +150,8 @@ class TestQAPipelineNodes:
                     or "未检索到" in result.kb_context
                 )
 
-    def test_call_tools_node_disabled(self, config, mock_components):
-        """测试工具调用节点（禁用工具）"""
+    def test_agent_node_no_tools_disabled(self, config, mock_components):
+        """测试工具禁用时 agent_node 不会被调用（_should_call_tools 路由到 build_context）"""
         config.retrieve.use_tool = False
 
         with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
@@ -161,9 +161,7 @@ class TestQAPipelineNodes:
                 pipeline.logger = Mock()
 
                 state = QAState(original_query="测试")
-                result = pipeline._call_tools(state)
-
-                assert result.tool_context == ""
+                assert pipeline._should_call_tools(state) == "skip_tools"
 
     def test_build_context_node(self, config, mock_components):
         """测试上下文构建节点"""
@@ -174,6 +172,7 @@ class TestQAPipelineNodes:
                 pipeline.logger = Mock()
 
                 state = QAState(
+                    original_query="测试",
                     kb_context="【知识库检索内容】\n文档 1",
                     tool_context="【工具返回内容】\n工具结果",
                 )
@@ -185,21 +184,35 @@ class TestQAPipelineNodes:
                     or "文档 1" in result.final_context
                 )
 
-    def test_generate_answer_node(self, config, mock_components):
-        """测试答案生成节点"""
+    def test_agent_node_generates_answer(self, config, mock_components):
+        """测试 agent_node 无 tool_calls 时直接生成答案"""
+        from unittest.mock import MagicMock
+        from langchain_core.messages import AIMessage
+
         with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
             with patch.object(LangGraphQAPipeline, "_build_graph", return_value=None):
                 pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
                 pipeline.config = config
                 pipeline.logger = Mock()
                 pipeline.llm_caller = mock_components["llm"]
-                pipeline.prompt = config.prompt
+
+                # mock LLM 返回无 tool_calls 的响应
+                mock_response = MagicMock()
+                mock_response.choices[0].message.tool_calls = None
+                mock_response.choices[0].message.content = "这是模拟答案"
+                mock_components["llm"].chat.return_value = mock_response
+
+                # mock MCP client
+                pipeline.mcp_client = mock_components["mcp_client"]
+                pipeline.mcp_client._convert_mcp_tools_to_openai_format.return_value = []
 
                 state = QAState(original_query="测试问题", final_context="上下文信息")
-                result = pipeline._generate_answer(state)
+                result = pipeline._agent_node(state)
 
                 assert len(result.messages) > 0
                 assert result.error is None
+                ai_msgs = [m for m in result.messages if isinstance(m, AIMessage)]
+                assert len(ai_msgs) > 0
 
     def test_update_memory_node_enabled(self, config, mock_components):
         """测试记忆更新节点（启用）"""
@@ -299,10 +312,10 @@ class TestQAPipelineConditionalEdges:
                 pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
                 pipeline.config = config
 
-                # 启用工具
+                # 启用工具 → 路由到 agent_node
                 config.retrieve.use_tool = True
                 state = QAState(original_query="测试")
-                assert pipeline._should_call_tools(state) == "call_tools"
+                assert pipeline._should_call_tools(state) == "call_agent"
 
                 # 禁用工具
                 config.retrieve.use_tool = False

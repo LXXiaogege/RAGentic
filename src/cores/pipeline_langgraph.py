@@ -11,11 +11,12 @@
 
 import asyncio
 import concurrent.futures
+import os
 import time
 from functools import wraps
 from typing import Annotated, Any, Callable, Dict, Generator, List, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.base import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -31,7 +32,7 @@ from src.configs.logger_config import setup_logger
 from src.cores.message_builder import MessageBuilder
 from src.cores.query_transformer import QueryTransformer
 from src.db_services.milvus.connection_manager import MilvusConnectionManager
-from src.mcp.mcp_client import MCPClient, mcp_main
+from src.mcp.mcp_client import MCPClient, _find_project_root
 from src.models.embedding import TextEmbedding
 from src.models.llm import LLMWrapper
 
@@ -60,12 +61,21 @@ class QAState(BaseModel):
     original_query: str
     transformed_query: Optional[str] = None
 
+    # 运行时配置（可通过 ask() 传参覆盖）
+    use_knowledge_base: Optional[bool] = None
+    use_tools: Optional[bool] = None
+    use_memory: Optional[bool] = None
+
     # 检索结果
     kb_context: Optional[str] = None
     tool_context: Optional[str] = None
     final_context: Optional[str] = None
 
     error: Optional[str] = None
+
+    # Agent loop 状态
+    agent_iteration: int = 0
+    tool_calls_history: List[Dict[str, Any]] = []
 
 
 def build_prompt_messages(
@@ -168,14 +178,13 @@ class LangGraphQAPipeline:
         workflow = StateGraph(QAState)
 
         # 添加节点
-        workflow.add_node("parse_query", self._parse_query)  # 解析查询及配置参数
-        workflow.add_node("transform_query", self._transform_query)  # 转换查询
-        workflow.add_node(
-            "check_retrieve_knowledge", self._check_retrieve_knowledge
-        )  # 检查是否需要检索知识库
+        workflow.add_node("parse_query", self._parse_query)
+        workflow.add_node("transform_query", self._transform_query)
+        workflow.add_node("check_retrieve_knowledge", self._check_retrieve_knowledge)
         workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("check_call_tools", self._check_call_tools)
-        workflow.add_node("call_tools", self._call_tools)
+        workflow.add_node("agent_node", self._agent_node)
+        workflow.add_node("tools_node", self._tools_node)
         workflow.add_node("build_context", self._build_context)
         workflow.add_node("generate_answer", self._generate_answer)
         workflow.add_node("update_memory", self._update_memory)
@@ -202,7 +211,7 @@ class LangGraphQAPipeline:
                 "error": "handle_error",
             },
         )
-        # 当执行transform_query时
+
         workflow.add_conditional_edges(
             "transform_query",
             self._should_retrieve_knowledge,
@@ -217,13 +226,12 @@ class LangGraphQAPipeline:
             "check_call_tools",
             self._should_call_tools,
             {
-                "call_tools": "call_tools",
+                "call_agent": "agent_node",
                 "skip_tools": "build_context",
                 "error": "handle_error",
             },
         )
 
-        # 是否需要知识库检索
         workflow.add_conditional_edges(
             "check_retrieve_knowledge",
             self._should_retrieve_knowledge,
@@ -234,24 +242,41 @@ class LangGraphQAPipeline:
             },
         )
 
-        # 知识检索后的条件分支
         workflow.add_conditional_edges(
             "retrieve_knowledge",
             self._should_call_tools,
             {
-                "call_tools": "call_tools",
+                "call_agent": "agent_node",
                 "skip_tools": "build_context",
                 "error": "handle_error",
             },
         )
 
-        # 工具调用后构建上下文
-        workflow.add_edge("call_tools", "build_context")
+        # Agent loop
+        workflow.add_conditional_edges(
+            "agent_node",
+            self._should_continue_agent_loop,
+            {
+                "has_tool_calls": "tools_node",
+                "done": "build_context",
+                "error": "handle_error",
+            },
+        )
+        workflow.add_edge("tools_node", "agent_node")
 
-        # 构建上下文后生成答案
-        workflow.add_edge("build_context", "generate_answer")
+        # build_context 后：若 agent loop 已生成答案则直接更新记忆，否则调用 LLM 生成答案
+        workflow.add_conditional_edges(
+            "build_context",
+            self._should_generate_answer,
+            {
+                "generate_answer": "generate_answer",
+                "skip_generate": "update_memory",
+                "finish": END,
+                "error": "handle_error",
+            },
+        )
 
-        # 生成答案后的条件分支
+        # 生成答案后条件分支
         workflow.add_conditional_edges(
             "generate_answer",
             self._should_update_memory,
@@ -263,7 +288,6 @@ class LangGraphQAPipeline:
 
         # 错误处理后结束
         workflow.add_edge("handle_error", END)
-        pass
 
     # =================== 节点实现 ===================
     @timing_decorator
@@ -375,37 +399,194 @@ class LangGraphQAPipeline:
         return f"【知识库检索内容】\n{kb_context}"
 
     @timing_decorator
-    def _call_tools(self, state: QAState) -> QAState:
-        """调用外部工具"""
+    def _agent_node(self, state: QAState) -> QAState:
+        """Agent 节点：LLM with tools，循环调用直到无 tool_calls"""
         try:
-            if not self.config.retrieve.use_tool:
-                state.tool_context = ""
-                return state
+            self.logger.info(
+                f"Agent节点迭代 {state.agent_iteration}，"
+                f"当前 tool_calls_history 长度: {len(state.tool_calls_history)}，"
+                f"messages 数量: {len(state.messages)}"
+            )
 
-            query = state.original_query
-            self.logger.info(f"调用工具: {query}")
-
-            def run_in_thread():
-                return asyncio.run(mcp_main(self.mcp_client, query))
-
-            # 在线程中执行异步任务，防止阻塞主线程
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_thread)
-                tool_result = future.result(timeout=30)
-
-            # 处理工具结果
-            if tool_result:
-                state.tool_context = f"【工具返回内容】\n{tool_result}"
-                self.logger.info(f"工具调用成功，返回内容长度: {len(tool_result)}")
+            # 获取工具 schema（需要已连接的 session）
+            if self.config.retrieve.use_tool:
+                openai_tools = self._get_openai_tools()
             else:
-                state.tool_context = ""
-                self.logger.info("工具调用无返回结果")
+                openai_tools = []
+
+            if state.agent_iteration == 0:
+                system_prompt = (
+                    self.config.prompt.kb_system_prompt
+                    if self.config.retrieve.use_kb
+                    else self.config.prompt.system_prompt
+                )
+                messages = build_prompt_messages(
+                    state,
+                    system_prompt=system_prompt,
+                    use_memory=self.config.retrieve.use_memory,
+                    memory_limit=self.config.retrieve.memory_window_size,
+                )
+            else:
+                messages = list(state.messages)
+
+            extra_body = self.config.retrieve.extra_body
+            call_kwargs = dict(
+                messages=messages,
+                return_raw=True,
+                extra_body=extra_body,
+            )
+            if openai_tools:
+                call_kwargs["tools"] = openai_tools
+                call_kwargs["tool_choice"] = "auto"
+
+            response = self.llm_caller.chat(**call_kwargs)
+            raw_message = response.choices[0].message
+
+            if openai_tools and raw_message.tool_calls:
+                lc_tool_calls = [
+                    {
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "args": __import__("json").loads(tc.function.arguments),
+                        "type": "tool_call",
+                    }
+                    for tc in raw_message.tool_calls
+                ]
+                ai_msg = AIMessage(
+                    content=raw_message.content or "",
+                    tool_calls=lc_tool_calls,
+                )
+                if state.agent_iteration == 0:
+                    state.messages += [HumanMessage(content=state.original_query), ai_msg]
+                else:
+                    state.messages += [ai_msg]
+                state.agent_iteration += 1
+                self.logger.info(
+                    f"Agent决定调用工具: {[tc['name'] for tc in lc_tool_calls]}"
+                )
+            else:
+                answer_content = raw_message.content or ""
+                ai_msg = AIMessage(content=answer_content)
+                if state.agent_iteration == 0:
+                    state.messages += [HumanMessage(content=state.original_query), ai_msg]
+                else:
+                    state.messages += [ai_msg]
+                state.agent_iteration += 1
+                if state.tool_calls_history:
+                    tool_results = "\n".join(
+                        f"[{r['tool']}]: {r['result']}" for r in state.tool_calls_history
+                    )
+                    state.tool_context = f"【工具返回内容】\n{tool_results}"
+                self.logger.info("Agent生成最终答案")
 
             return state
 
         except Exception as e:
-            self.logger.exception(f"工具调用失败：{e}")
-            state.error = f"工具调用失败：{str(e)}"
+            self.logger.exception(f"Agent节点执行失败：{e}")
+            state.error = f"Agent节点执行失败：{str(e)}"
+            return state
+
+    def _get_openai_tools(self) -> list:
+        """获取 OpenAI 格式的工具列表（每次临时连接获取）"""
+        async def _fetch():
+            client = MCPClient(self.llm_caller)
+            try:
+                project_root = _find_project_root()
+                server_script = os.path.join(project_root, "mcp_server.py")
+                await client.connect_to_server(server_script)
+                return client._convert_mcp_tools_to_openai_format()
+            finally:
+                await client.cleanup()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            return executor.submit(lambda: asyncio.run(_fetch())).result(timeout=15)
+
+    @timing_decorator
+    def _tools_node(self, state: QAState) -> QAState:
+        """工具节点：执行 AIMessage 中的 tool_calls"""
+        try:
+            last_ai = next(
+                (
+                    m
+                    for m in reversed(state.messages)
+                    if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+                ),
+                None,
+            )
+            if not last_ai:
+                self.logger.warning("tools_node: 未找到待执行的 tool_calls")
+                return state
+
+            tool_calls = last_ai.tool_calls
+            self.logger.info(f"执行 {len(tool_calls)} 个工具调用")
+
+            async def _run_tools():
+                client = MCPClient(self.llm_caller)
+                try:
+                    project_root = _find_project_root()
+                    server_script = os.path.join(project_root, "mcp_server.py")
+                    await client.connect_to_server(server_script)
+                    return await client.execute_tool_calls(tool_calls)
+                finally:
+                    await client.cleanup()
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                results = executor.submit(lambda: asyncio.run(_run_tools())).result(timeout=30)
+
+            tool_messages = [
+                ToolMessage(content=result, tool_call_id=tc["id"])
+                for tc, result in zip(tool_calls, results)
+            ]
+            state.messages += tool_messages
+
+            history = list(state.tool_calls_history)
+            for tc, result in zip(tool_calls, results):
+                history.append({"tool": tc["name"], "args": tc["args"], "result": result})
+                self.logger.info(f"工具 [{tc['name']}] 结果: {result[:200] if result else '(空)'}")
+            state.tool_calls_history = history
+
+            self.logger.info(f"工具调用完成，共 {len(results)} 条结果，tool_calls_history 长度: {len(history)}")
+            return state
+
+        except Exception as e:
+            self.logger.exception(f"工具节点执行失败：{e}")
+            state.error = f"工具节点执行失败：{str(e)}"
+            return state
+
+    @timing_decorator
+    def _generate_answer(self, state: QAState) -> QAState:
+        """生成答案（use_tool=False 时的纯 LLM 生成路径）"""
+        try:
+            self.logger.info("开始生成答案")
+
+            system_prompt = (
+                self.config.prompt.kb_system_prompt
+                if self.config.retrieve.use_kb
+                else self.config.prompt.system_prompt
+            )
+
+            messages = build_prompt_messages(
+                state,
+                system_prompt=system_prompt,
+                use_memory=self.config.retrieve.use_memory,
+                memory_limit=self.config.retrieve.memory_window_size,
+            )
+
+            answer = self.llm_caller.chat(messages=messages)
+
+            if not hasattr(state, "messages") or state.messages is None:
+                state.messages = []
+            state.messages += [
+                HumanMessage(content=state.original_query),
+                AIMessage(content=answer),
+            ]
+
+            self.logger.info("答案生成完成")
+            return state
+
+        except Exception as e:
+            self.logger.exception(f"生成答案失败：{e}")
+            state.error = f"生成答案失败：{str(e)}"
             return state
 
     def _build_context(self, state: QAState) -> QAState:
@@ -429,46 +610,6 @@ class LangGraphQAPipeline:
         except Exception as e:
             self.logger.exception(f"构建上下文失败：{e}")
             state.error = f"构建上下文失败：{str(e)}"
-            return state
-
-    @timing_decorator
-    def _generate_answer(self, state: QAState) -> QAState:
-        """生成答案"""
-        try:
-            self.logger.info("开始生成答案")
-
-            # 根据是否启用知识库选择系统提示
-            system_prompt = (
-                self.config.prompt.kb_system_prompt
-                if self.config.retrieve.use_kb
-                else self.config.prompt.system_prompt
-            )
-
-            # 构建消息
-            messages = build_prompt_messages(
-                state,
-                system_prompt=system_prompt,
-                use_memory=self.config.retrieve.use_memory,
-                memory_limit=self.config.retrieve.memory_window_size,
-            )
-
-            # 调用 LLM 生成答案
-            answer = self.llm_caller.chat(messages=messages)
-
-            # 添加答案到消息历史
-            if not hasattr(state, "messages") or state.messages is None:
-                state.messages = []
-            state.messages += [
-                HumanMessage(content=state.original_query),
-                AIMessage(content=answer),
-            ]
-
-            self.logger.info("答案生成完成")
-            return state
-
-        except Exception as e:
-            self.logger.exception(f"生成答案失败：{e}")
-            state.error = f"生成答案失败：{str(e)}"
             return state
 
     @timing_decorator
@@ -530,9 +671,47 @@ class LangGraphQAPipeline:
             return "error"
 
         if self.config.retrieve.use_tool:
-            return "call_tools"
+            return "call_agent"
         else:
             return "skip_tools"
+
+    def _should_continue_agent_loop(self, state: QAState) -> str:
+        """判断 agent loop 是否继续"""
+        if state.error:
+            return "error"
+
+        if state.agent_iteration >= self.config.retrieve.max_agent_iterations:
+            self.logger.warning(
+                f"Agent达到最大迭代次数 {self.config.retrieve.max_agent_iterations}，强制结束"
+            )
+            return "done"
+
+        last_ai = next(
+            (m for m in reversed(state.messages) if isinstance(m, AIMessage)),
+            None,
+        )
+        self.logger.info(
+            f"_should_continue_agent_loop: messages={len(state.messages)}, "
+            f"last_ai={type(last_ai).__name__ if last_ai else None}, "
+            f"last_ai.tool_calls={getattr(last_ai, 'tool_calls', None)}"
+        )
+        if last_ai and getattr(last_ai, "tool_calls", None):
+            return "has_tool_calls"
+        return "done"
+
+    def _should_generate_answer(self, state: QAState) -> str:
+        """判断 build_context 后是否需要 LLM 生成答案"""
+        if state.error:
+            return "error"
+
+        # agent loop 已经生成了答案，无需再调用 LLM
+        if state.agent_iteration > 0:
+            if self.config.retrieve.use_memory:
+                return "skip_generate"
+            return "finish"
+
+        # 没有经过 agent loop（use_tool=False），需要 generate_answer
+        return "generate_answer"
 
     def _should_update_memory(self, state: QAState) -> str:
         """判断是否需要更新记忆"""
@@ -571,21 +750,20 @@ class LangGraphQAPipeline:
         # 创建配置对象
         config = RunnableConfig(
             configurable={
-                "thread_id": kwargs.get("thread_id", "0"),  # 会话ID，标记第几轮对话
+                "thread_id": kwargs.get("thread_id", "0"),
             }
         )
         if self.langfuse_handler:
             config["callbacks"] = [self.langfuse_handler]
             self.update_langfuse_trace(**kwargs)
 
-        existing_messages = kwargs.get("messages", [])  # 参数传入，前台来管理
+        existing_messages = kwargs.get("messages", [])
 
         # 初始化状态
-        initial_state_dict = {
-            "original_query": query,
-            "messages": existing_messages,
-        }
-        initial_state_object = QAState(**initial_state_dict)
+        initial_state_object = QAState(
+            original_query=query,
+            messages=existing_messages,
+        )
 
         try:
             result = self.graph.invoke(initial_state_object, config)
@@ -593,11 +771,11 @@ class LangGraphQAPipeline:
             if result.get("error"):
                 return {"error": result["error"]}
 
-            # 提取最后的AI消息作为答案
+            # 提取最后的AI消息（无 tool_calls 的）作为答案
             ai_messages = [
                 msg.content
                 for msg in result.get("messages", [])
-                if isinstance(msg, AIMessage)
+                if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None)
             ]
 
             answer = ai_messages[-1] if ai_messages else "无法生成答案"
@@ -605,11 +783,13 @@ class LangGraphQAPipeline:
             return {
                 "question": query,
                 "answer": answer,
-                "messages": result.get("messages", existing_messages),  # ✅ 返回给前台
+                "messages": result.get("messages", existing_messages),
                 "transformed_query": result.get("transformed_query", ""),
                 "context": result.get("final_context", ""),
                 "kb_context": result.get("kb_context", ""),
                 "tool_context": result.get("tool_context", ""),
+                "tool_calls_history": result.get("tool_calls_history", []),
+                "agent_iterations": result.get("agent_iteration", 0),
             }
 
         except Exception as e:
@@ -622,7 +802,7 @@ class LangGraphQAPipeline:
         # 创建配置对象
         config = RunnableConfig(
             configurable={
-                "thread_id": kwargs.get("thread_id", "0"),  # 会话ID，标记第几轮对话
+                "thread_id": kwargs.get("thread_id", "0"),
             }
         )
         if self.langfuse_handler:
@@ -630,11 +810,10 @@ class LangGraphQAPipeline:
             self.update_langfuse_trace(**kwargs)
 
         # 初始化状态
-        initial_state_dict = {
-            "original_query": query,
-            "messages": [],
-        }
-        initial_state_object = QAState(**initial_state_dict)
+        initial_state_object = QAState(
+            original_query=query,
+            messages=[],
+        )
 
         try:
             for event in self.graph.stream(initial_state_object, config):
@@ -643,7 +822,6 @@ class LangGraphQAPipeline:
                 node_name = list(event.keys())[0]
                 node_state = event[node_name]
 
-                # node_state may be a QAState object or a plain dict depending on the node
                 def _get(key, default=None):
                     if isinstance(node_state, dict):
                         return node_state.get(key, default)
@@ -669,23 +847,22 @@ class LangGraphQAPipeline:
                     },
                 }
 
-                # 如果是生成答案节点，实现流式生成
-                if node_name == "generate_answer":
+                # agent_node 完成且无 tool_calls 时，返回答案
+                if node_name in ("agent_node", "generate_answer"):
                     messages = _get("messages") or []
-                    if messages:
-                        # 获取最后一条AI消息
-                        ai_messages = [
-                            msg.content
-                            for msg in messages
-                            if isinstance(msg, AIMessage)
-                        ]
-                        if ai_messages:
-                            yield {
-                                "node": "generate_answer",
-                                "status": "complete",
-                                "answer": ai_messages[-1],
-                                "context": _get("final_context"),
-                            }
+                    ai_msgs = [
+                        msg.content
+                        for msg in messages
+                        if isinstance(msg, AIMessage)
+                        and not getattr(msg, "tool_calls", None)
+                    ]
+                    if ai_msgs:
+                        yield {
+                            "node": node_name,
+                            "status": "complete",
+                            "answer": ai_msgs[-1],
+                            "context": _get("final_context"),
+                        }
 
         except Exception as e:
             self.logger.error(f"流式问答处理失败: {e}")

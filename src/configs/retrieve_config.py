@@ -56,6 +56,7 @@ class SearchConfig(BaseModel):
 
     use_think: bool = Field(True, description="是否跳过推理过程（R1）")
     use_tool: bool = Field(False, description="是否在工具模式下执行")
+    max_agent_iterations: int = Field(10, ge=1, description="Agent工具调用循环最大迭代次数")
 
     extra_body: Dict[str, Any] = Field(
         default_factory=lambda: {"chat_template_kwargs": {"enable_thinking": False}},

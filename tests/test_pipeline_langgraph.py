@@ -20,7 +20,7 @@ pipeline = LangGraphQAPipeline(config)
 # pipeline.export_graph()
 
 # 使用tool
-result = pipeline.ask("大模型是什么，一句话概括", use_tools=False)
+result = pipeline.ask("今天纽约天气如何")
 print(result)
 
 # result = pipeline.ask("你还记得我叫什么嘛？", use_memory=True)

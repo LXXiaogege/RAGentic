@@ -105,6 +105,28 @@ class MCPClient:
             openai_tools.append(openai_tool)
         return openai_tools
 
+    async def execute_tool_calls(self, tool_calls: list) -> list:
+        """执行一组 tool_calls（LangChain ToolCall 格式），返回结果字符串列表"""
+
+        async def call_single_tool(tool_call):
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            logger.info(f"Calling tool: {tool_name} with args: {tool_args}")
+            try:
+                tool_result = await self.session.call_tool(tool_name, tool_args)
+                if not tool_result.isError and tool_result.content:
+                    content = tool_result.content[0]
+                    text = content.text if hasattr(content, "text") else str(content)
+                    logger.info(f"Tool {tool_name} executed successfully")
+                    return f"[Tool {tool_name} result]: {text}"
+                logger.error(f"Tool {tool_name} returned an error")
+                return f"[Error calling tool {tool_name}]"
+            except Exception as e:
+                logger.error(f"Error executing tool {tool_name}: {str(e)}")
+                return f"[Exception calling tool {tool_name}: {e}]"
+
+        return list(await asyncio.gather(*[call_single_tool(tc) for tc in tool_calls]))
+
     async def process_query(self, query: str) -> str:
         """Process a query using openai and available tools"""
         logger.info(f"Processing query: {query}")
