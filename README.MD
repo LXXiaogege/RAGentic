@@ -112,11 +112,15 @@ print(mermaid_code)
 工作流包含以下节点：
 1. `parse_query` - 解析查询参数
 2. `transform_query` - 查询改写（可选）
-3. `retrieve_knowledge` - 知识库检索
-4. `call_tools` - 工具调用
-5. `build_context` - 构建上下文
-6. `generate_answer` - 生成答案
-7. `update_memory` - 更新记忆
+3. `check_retrieve_knowledge` - 决定是否进入知识库检索
+4. `retrieve_knowledge` - 知识库检索
+5. `check_call_tools` - 决定是否进入工具/Agent 循环
+6. `agent_node` - Agent 推理并生成 tool 调用请求（use_tool=True 时）
+7. `tools_node` - 执行 MCP 工具调用并回填 tool 结果
+8. `build_context` - 构建最终上下文
+9. `generate_answer` - 生成答案
+10. `update_memory` - 更新记忆
+11. `handle_error` - 异常处理分支（错误时）
 
 ### 📁 项目结构
 
@@ -157,6 +161,8 @@ RAGentic/
 RERANK__MODEL_PATH=data/models/bge-reranker-base
 BM25__MODEL_DIR=data/knowledge_db/bm25_model
 MILVUS__VECTOR_DB_URI=data/knowledge_db/db/rag.db
+MILVUS__MEMORY_DB_URI=data/memory.db
+MEM0__HISTORY_DB_PATH=data/memory/history.db
 RETRIEVE__KB_PATH=data/knowledge_db/psychology
 ```
 
@@ -165,6 +171,8 @@ RETRIEVE__KB_PATH=data/knowledge_db/psychology
 ```bash
 export RERANK__MODEL_PATH=/custom/path/to/rerank
 export MILVUS__VECTOR_DB_URI=/custom/path/to/db
+export MILVUS__MEMORY_DB_URI=/custom/path/to/memory.db
+export MEM0__HISTORY_DB_PATH=/custom/path/to/history.db
 ```
 
 ### 📊 测试
@@ -228,7 +236,9 @@ MIT License
     "transformed_query": str,  # 改写后的查询（如有）
     "context": str,            # 最终上下文
     "kb_context": str,         # 知识库检索内容
-    "tool_context": str        # 工具调用结果
+    "tool_context": str,       # 工具调用结果
+    "tool_calls_history": list,  # 工具调用历史（agent loop）
+    "agent_iterations": int       # Agent 迭代次数
 }
 ```
 
@@ -260,14 +270,14 @@ print(result["answer"])
 
 **返回值：** 生成器，每次 yield 一个事件字典：
 ```python
-# 节点处理中
-{"node": "retrieve_knowledge", "status": "processing", "state": {...}}
+# 节点处理中（每个节点都会 yield 一次）
+{"node": "build_context", "status": "processing", "state": {"kb_context": "...", "tool_context": "...", "final_context": "..."}}
 
-# 答案生成完成
+# 答案生成完成（仅在 agent_node / generate_answer 节点触发）
 {"node": "generate_answer", "status": "complete", "answer": "...", "context": "..."}
 
 # 错误
-{"status": "error", "error": "错误信息"}
+{"node": "<节点名>", "status": "error", "error": "错误信息"}
 ```
 
 **示例：**
@@ -320,10 +330,14 @@ mermaid_code = pipeline.export_graph("workflow.mmd")
 | `use_sparse` | bool | False | 是否启用稀疏检索（BM25） |
 | `use_reranker` | bool | False | 是否启用重排序 |
 | `use_rewrite` | bool | False | 是否启用查询改写 |
-| `rewrite_mode` | str | "hyde" | 改写模式：hyde/step-back/sub-query |
-| `top_k` | int | 5 | 检索返回数量 |
-| `memory_window_size` | int | 10 | 对话记忆窗口大小 |
-| `kb_path` | str | - | 知识库目录路径 |
+| `rewrite_mode` | str | "rewrite" | 改写模式：rewrite/step_back/sub_query/hyde（知识库查询下有效） |
+| `num_hypo` | int | 3 | HyDE 模式下生成假设答案数量 |
+| `retriever_type` | str | "dense" | dense / sparse / hybrid |
+| `top_k` | int | 3 | 检索返回数量 |
+| `memory_window_size` | int | 5 | 对话记忆窗口大小 |
+| `kb_path` | str | "data/knowledge_db/psychology" | 知识库目录路径 |
+| `use_think` | bool | True | 是否跳过推理过程（R1） |
+| `max_agent_iterations` | int | 10 | Agent 工具调用循环最大迭代次数 |
 
 **环境变量：** `RETRIEVE__KB_PATH`, `RETRIEVE__TOP_K` 等
 
@@ -358,9 +372,11 @@ mermaid_code = pipeline.export_graph("workflow.mmd")
 |--------|------|--------|------|
 | `milvus_mode` | str | "local" | 模式：local/remote |
 | `vector_db_uri` | str | "data/knowledge_db/db/rag.db" | 本地数据库路径 |
-| `db_name` | str | - | 远程数据库名称 |
-| `collection_name` | str | "knowledge_collection" | 集合名称 |
-| `vector_dimension` | int | 768 | 向量维度 |
+| `db_name` | str | "test" | 远程数据库名称 |
+| `collection_name` | str | "pys" | 集合名称 |
+| `vector_dimension` | int | 1024 | 向量维度 |
+| `memory_collection_name` | str | "mem0_with_milvus" | mem0 历史集合名称 |
+| `memory_db_uri` | str | "data/memory.db" | mem0 历史记录数据库路径 |
 
 **环境变量：** `MILVUS__VECTOR_DB_URI`, `MILVUS__MEMORY_DB_URI`
 

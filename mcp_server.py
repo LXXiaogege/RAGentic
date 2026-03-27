@@ -5,9 +5,9 @@
 @File ：mcp_server.py
 @IDE ：PyCharm
 """
+
 from typing import Any
 import httpx
-import asyncio
 
 from fastmcp import FastMCP
 from src.agent.tools import WebSpider
@@ -51,10 +51,10 @@ async def weather_get_alerts(state: str) -> str:
     for f in data["features"]:
         props = f["properties"]
         alerts.append(
-            f"Event: {props.get('event','Unknown')}\n"
-            f"Area: {props.get('areaDesc','Unknown')}\n"
-            f"Severity: {props.get('severity','Unknown')}\n"
-            f"Description: {props.get('description','No description')}"
+            f"Event: {props.get('event', 'Unknown')}\n"
+            f"Area: {props.get('areaDesc', 'Unknown')}\n"
+            f"Severity: {props.get('severity', 'Unknown')}\n"
+            f"Description: {props.get('description', 'No description')}"
         )
     return "\n---\n".join(alerts)
 
@@ -67,7 +67,9 @@ async def weather_get_forecast(latitude: float, longitude: float) -> str:
         latitude: Latitude of the location
         longitude: Longitude of the location
     """
-    points_data = await _make_nws_request(f"{NWS_API_BASE}/points/{latitude},{longitude}")
+    points_data = await _make_nws_request(
+        f"{NWS_API_BASE}/points/{latitude},{longitude}"
+    )
     if not points_data:
         return "Unable to fetch forecast data for this location."
     forecast_url = points_data["properties"]["forecast"]
@@ -124,6 +126,17 @@ def read_skill(name: str) -> str:
     return body
 
 
+# ---- Knowledge Base search tool ----
+@main_mcp.tool()
+async def kb_search(query: str, top_k: int = 3) -> str:
+    """搜索知识库获取相关文档。当你需要查询特定事实、信息或知识时调用此工具。
+
+    Args:
+        query: 搜索查询词或问题
+        top_k: 返回的文档数量，默认3条
+    """
+    return "[KB_SEARCH_PLACEHOLDER] 此工具由Pipeline直接执行"
+
+
 if __name__ == "__main__":
     main_mcp.run()
-

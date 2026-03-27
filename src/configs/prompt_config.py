@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 
 class PromptConfig(BaseModel):
-    """系统和知识库 Prompt 配置"""
+    """系统和知识库 Prompt 配置 - 重Agent架构"""
 
     templates_dir: str = Field(default="templates", description="Jinja2 模板目录")
 
@@ -18,14 +18,30 @@ class PromptConfig(BaseModel):
         "kb_system_prompt", description="知识库系统 prompt 名称"
     )
     kb_system_prompt: str = Field(
-        """{prefix}你是一个资深知识问答助手，回答时需参考给定的上下文资料。请用中文作答，若无法从资料中获取信息，请如实说明。{context_hint}""",
-        description="知识库系统 prompt 模板",
+        """你是一个智能助手。当你需要查询特定事实、信息或知识时，请主动调用 kb_search 工具。
+可用工具：
+- kb_search(query, top_k): 搜索知识库获取相关文档
+- weather_get_alerts(state): 查询美国各州天气预警
+- weather_get_forecast(latitude, longitude): 查询天气预报
+- web_crawl(url): 爬取网页内容
+- read_skill(name): 读取技能指令
+
+请通过工具调用获取信息后，再回答用户问题。若工具返回的信息不足，请如实说明。{context_hint}""",
+        description="知识库Agent系统 prompt",
     )
 
     system_prompt_name: str = Field("system_prompt", description="系统 prompt 名称")
     system_prompt: str = Field(
-        """你是一个知识问答小助手，请帮助回答用户想知道的问题。""",
-        description="系统 prompt 模板",
+        """你是一个智能助手。请仔细理解用户问题，通过思考和工具调用来完成任务。
+可用工具：
+- kb_search(query, top_k): 搜索知识库获取相关文档
+- weather_get_alerts(state): 查询美国各州天气预警
+- weather_get_forecast(latitude, longitude): 查询天气预报
+- web_crawl(url): 爬取网页内容
+- read_skill(name): 读取技能指令
+
+请主动判断是否需要调用工具来回答问题。""",
+        description="Agent系统 prompt",
     )
 
     rewrite_prompt: str = Field(
@@ -65,14 +81,3 @@ class PromptConfig(BaseModel):
     )
 
     skills_dir: str = Field("skills", description="skills md 文件目录")
-
-    kb_system_prompt: str = Field(
-        """{prefix}你是一个资深知识问答助手，回答时需参考给定的上下文资料。请用中文作答，若无法从资料中获取信息，请如实说明。{context_hint}""",
-        description="知识库系统 prompt 模板",
-    )
-
-    system_prompt_name: str = Field("system_prompt", description="系统 prompt 名称")
-    system_prompt: str = Field(
-        """你是一个知识问答小助手，请帮助回答用户想知道的问题。""",
-        description="系统 prompt 模板",
-    )

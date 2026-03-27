@@ -8,17 +8,62 @@
 - Add package: `uv add <package>`
 - Remove package: `uv remove <package>`
 
-### Environment Setup
-```bash
-# Create virtual environment (if needed)
-uv venv
+## 🏗️ Project Structure
 
-# Sync dependencies
-uv sync
-
-# Set PYTHONPATH for imports
-export PYTHONPATH=.
 ```
+RAGentic/
+├── src/
+│   ├── a2a/              # A2A protocol integration
+│   ├── agent/           # Agent logic & tools
+│   ├── configs/         # Configuration classes
+│   ├── cores/           # Core pipeline logic (LangGraph)
+│   ├── data_process/    # Data processing
+│   ├── db_services/     # Database operations (Milvus)
+│   ├── evaluate/        # RAG evaluation
+│   ├── memory/          # Conversation memory (Mem0)
+│   ├── mcp/             # MCP tool integration
+│   ├── models/          # LLM/Embedding wrappers
+│   ├── skills/          # Agent skills
+│   └── utils/           # Utilities (security, etc.)
+├── tests/               # Test files
+├── data/                # Data files (gitignored)
+├── logs/                # Log files (gitignored)
+├── .env                 # Environment variables (gitignored)
+├── .env.example         # Environment template
+├── pyproject.toml       # Project dependencies
+└── skills/              # Skill definitions
+```
+
+## 🔧 Pipeline Architecture (LangGraph) - Light RAG, Heavy Agent
+
+### Workflow Graph
+```
+parse_query → check_call_tools
+                   ↓ (use_tool=True)
+              agent_node ↔ tools_node (含 kb_search 工具)
+                            ↓ (use_tool=False 或 agent完成)
+                        build_context → generate_answer → update_memory
+```
+
+### 核心变化
+- **RAG 工具化**: 知识库检索成为 `kb_search` MCP 工具，Agent 按需主动调用
+- **移除 transform_query**: Agent 自己处理复杂查询分解
+- **Agent 主导**: 主流程围绕 `agent_node` 展开，工具调用由 LLM 决定
+
+### Public API (`src/cores/pipeline_langgraph.py`)
+- `pipeline.ask(query, config?)` → sync dict with `answer`
+- `pipeline.ask_stream(query, config?)` → async generator of event dicts
+- `pipeline.batch_ask(queries)` → list of results
+
+### 可用工具 (MCP Tools)
+- `kb_search(query, top_k)` - 搜索知识库
+- `weather_get_alerts(state)` - 天气预警
+- `weather_get_forecast(lat, lon)` - 天气预报
+- `web_crawl(url)` - 网页爬取
+- `read_skill(name)` - 读取技能指令
+
+### State Management
+State flows as `QAState` (TypedDict) through all nodes. Conditional edge `check_call_tools` decides whether to enter agent loop based on `config.retrieve.use_tool`.
 
 ## 🧪 Testing
 
@@ -95,7 +140,7 @@ def ask(self, query: str, **kwargs) -> Dict[str, Any]:
 
 ### Naming Conventions
 - **Classes**: PascalCase (`LangGraphQAPipeline`, `AppConfig`)
-- **Functions/Methods**: snake_case (`transform_query`, `build_context`)
+- **Functions/Methods**: snake_case (`build_context`, `kb_search`)
 - **Constants**: UPPER_SNAKE_CASE (`BASE_DIR`, `MAX_RETRIES`)
 - **Private members**: Leading underscore (`_init_components`)
 - **Files**: snake_case (`pipeline_langgraph.py`)
@@ -144,28 +189,6 @@ except Exception as e:
 - Comment "why", not "what" (code should be self-explanatory)
 - Use Chinese comments (project convention)
 
-## 🏗️ Project Structure
-
-```
-RAGentic/
-├── src/
-│   ├── configs/          # Configuration classes
-│   ├── cores/            # Core pipeline logic
-│   ├── models/           # LLM/Embedding wrappers
-│   ├── db_services/      # Database operations
-│   ├── memory/           # Conversation memory
-│   ├── mcp/              # MCP tool integration
-│   ├── agent/            # Agent logic
-│   ├── data_process/     # Data processing
-│   └── evaluate/         # RAG evaluation
-├── tests/                # Test files
-├── data/                 # Data files (gitignored)
-├── logs/                 # Log files (gitignored)
-├── .env                  # Environment variables (gitignored)
-├── .env.example          # Environment template
-└── pyproject.toml        # Project dependencies
-```
-
 ## 🚀 Common Tasks
 
 ### Run Web App
@@ -177,6 +200,13 @@ PYTHONPATH=. uv run python web_app.py
 ### Run MCP Server
 ```bash
 PYTHONPATH=. uv run python mcp_server.py
+```
+
+### Docker
+```bash
+docker-compose up -d                                           # basic
+docker-compose --profile with-redis up -d                     # + Redis cache
+docker-compose --profile with-redis --profile with-milvus up -d  # + production Milvus
 ```
 
 ### Export Pipeline Graph

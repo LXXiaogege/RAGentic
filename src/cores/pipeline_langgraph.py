@@ -33,6 +33,7 @@ from src.cores.message_builder import MessageBuilder
 from src.cores.query_transformer import QueryTransformer
 from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.mcp.mcp_client import MCPClient, _find_project_root
+from src.mcp.server.kb_tools import KBTools
 from src.models.embedding import TextEmbedding
 from src.models.llm import LLMWrapper
 from src.skills.skill_manager import SkillManager
@@ -158,6 +159,13 @@ class LangGraphQAPipeline:
         # Skills 管理器
         self.skill_manager = SkillManager(self.config.prompt.skills_dir)
 
+        # KB Tools (for agent-initiated RAG)
+        self.kb_tools = KBTools(
+            milvus_connection=self.db_connection_manager,
+            embeddings=self.embeddings,
+            search_config=self.config.retrieve,
+        )
+
         # 检查点保存器
         self.checkpointer = MemorySaver()
 
@@ -178,15 +186,9 @@ class LangGraphQAPipeline:
 
     def _build_graph(self):
         """构建LangGraph工作流"""
-        # 创建状态图
         workflow = StateGraph(QAState)
 
-        # 添加节点
         workflow.add_node("parse_query", self._parse_query)
-        workflow.add_node("transform_query", self._transform_query)
-        workflow.add_node("check_retrieve_knowledge", self._check_retrieve_knowledge)
-        workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
-        workflow.add_node("check_call_tools", self._check_call_tools)
         workflow.add_node("agent_node", self._agent_node)
         workflow.add_node("tools_node", self._tools_node)
         workflow.add_node("build_context", self._build_context)
@@ -194,40 +196,15 @@ class LangGraphQAPipeline:
         workflow.add_node("update_memory", self._update_memory)
         workflow.add_node("handle_error", self._handle_error)
 
-        # 定义流程
         self._define_workflow(workflow)
-
-        # 编译图
         self.graph = workflow.compile(checkpointer=self.checkpointer)
 
     def _define_workflow(self, workflow: StateGraph):
-        """定义工作流程"""
-        # 入口：解析查询
+        """定义工作流程 - Light RAG, Heavy Agent"""
         workflow.add_edge(START, "parse_query")
 
-        # 解析查询后的条件分支
         workflow.add_conditional_edges(
             "parse_query",
-            self._should_transform_query,
-            {
-                "transform": "transform_query",
-                "skip_transform": "check_retrieve_knowledge",
-                "error": "handle_error",
-            },
-        )
-
-        workflow.add_conditional_edges(
-            "transform_query",
-            self._should_retrieve_knowledge,
-            {
-                "do_retrieve": "retrieve_knowledge",
-                "skip_retrieve": "check_call_tools",
-                "error": "handle_error",
-            },
-        )
-
-        workflow.add_conditional_edges(
-            "check_call_tools",
             self._should_call_tools,
             {
                 "call_agent": "agent_node",
@@ -236,27 +213,6 @@ class LangGraphQAPipeline:
             },
         )
 
-        workflow.add_conditional_edges(
-            "check_retrieve_knowledge",
-            self._should_retrieve_knowledge,
-            {
-                "do_retrieve": "retrieve_knowledge",
-                "skip_retrieve": "check_call_tools",
-                "error": "handle_error",
-            },
-        )
-
-        workflow.add_conditional_edges(
-            "retrieve_knowledge",
-            self._should_call_tools,
-            {
-                "call_agent": "agent_node",
-                "skip_tools": "build_context",
-                "error": "handle_error",
-            },
-        )
-
-        # Agent loop
         workflow.add_conditional_edges(
             "agent_node",
             self._should_continue_agent_loop,
@@ -268,7 +224,6 @@ class LangGraphQAPipeline:
         )
         workflow.add_edge("tools_node", "agent_node")
 
-        # build_context 后：若 agent loop 已生成答案则直接更新记忆，否则调用 LLM 生成答案
         workflow.add_conditional_edges(
             "build_context",
             self._should_generate_answer,
@@ -280,17 +235,13 @@ class LangGraphQAPipeline:
             },
         )
 
-        # 生成答案后条件分支
         workflow.add_conditional_edges(
             "generate_answer",
             self._should_update_memory,
             {"update_memory": "update_memory", "finish": END, "error": "handle_error"},
         )
 
-        # 更新记忆后结束
         workflow.add_edge("update_memory", END)
-
-        # 错误处理后结束
         workflow.add_edge("handle_error", END)
 
     # =================== 节点实现 ===================
@@ -318,89 +269,6 @@ class LangGraphQAPipeline:
             self.logger.exception(f"解析查询失败：{e}")
             state.error = f"解析查询失败：{str(e)}"
             return state
-
-    @timing_decorator
-    def _transform_query(self, state: QAState) -> QAState:
-        """查询转换"""
-        try:
-            self.logger.info(f"转换查询：{state.original_query}")
-
-            if self.config.retrieve.use_rewrite:
-                transformed_query = self.query_transformer.transform_query(
-                    state.original_query, self.config.retrieve.rewrite_mode
-                )
-                state.transformed_query = transformed_query
-                self.logger.info(f"查询转换完成：{transformed_query}")
-            else:
-                state.transformed_query = ""
-
-            return state
-
-        except Exception as e:
-            self.logger.exception(f"查询转换失败：{e}")
-            state.error = f"查询转换失败：{str(e)}"
-            return state
-
-    def _check_retrieve_knowledge(self, state: QAState) -> QAState:
-        return state
-
-    def _check_call_tools(self, state: QAState) -> QAState:
-        return state
-
-    @timing_decorator
-    def _retrieve_knowledge(self, state: QAState) -> QAState:
-        """知识库检索"""
-        try:
-            if not self.config.retrieve.use_kb:
-                state.kb_context = ""
-                return state
-
-            query = getattr(state, "transformed_query", "") or state.original_query
-            self.logger.info(f"开始知识库检索：{query}")
-
-            results = self._perform_search(query)
-            state.kb_context = self._format_results(results)
-
-            return state
-
-        except Exception as e:
-            self.logger.exception(f"知识库检索失败：{e}")
-            state.error = f"知识库检索失败：{str(e)}"
-            return state
-
-    def _perform_search(self, query: str) -> list[dict]:
-        """执行检索 - 根据配置选择 HyDE 或标准检索"""
-        if (
-            self.config.retrieve.use_rewrite
-            and self.config.retrieve.rewrite_mode == "hyde"
-        ):
-            return asyncio.run(
-                self.query_transformer.hyde_search(
-                    query, self.config.retrieve.search_config
-                )
-            )
-        else:
-            return asyncio.run(
-                self.db_connection_manager.asearch(
-                    query, self.config.retrieve.search_config
-                )
-            )
-
-    def _format_results(self, results: list[dict]) -> str:
-        """格式化检索结果"""
-        if not results:
-            self.logger.warning("知识库检索未返回结果")
-            return "未检索到相关知识。"
-
-        valid_results = [doc for doc in results if doc and doc.get("text")]
-        if not valid_results:
-            return "未检索到有效知识。"
-
-        kb_context = "\n".join(
-            [f"【文档{i + 1}】{doc['text']}" for i, doc in enumerate(valid_results)]
-        )
-        self.logger.info(f"知识库检索返回 {len(results)} 条结果")
-        return f"【知识库检索内容】\n{kb_context}"
 
     @timing_decorator
     def _agent_node(self, state: QAState) -> QAState:
@@ -464,7 +332,10 @@ class LangGraphQAPipeline:
                     tool_calls=lc_tool_calls,
                 )
                 if state.agent_iteration == 0:
-                    state.messages += [HumanMessage(content=state.original_query), ai_msg]
+                    state.messages += [
+                        HumanMessage(content=state.original_query),
+                        ai_msg,
+                    ]
                 else:
                     state.messages += [ai_msg]
                 state.agent_iteration += 1
@@ -475,13 +346,17 @@ class LangGraphQAPipeline:
                 answer_content = raw_message.content or ""
                 ai_msg = AIMessage(content=answer_content)
                 if state.agent_iteration == 0:
-                    state.messages += [HumanMessage(content=state.original_query), ai_msg]
+                    state.messages += [
+                        HumanMessage(content=state.original_query),
+                        ai_msg,
+                    ]
                 else:
                     state.messages += [ai_msg]
                 state.agent_iteration += 1
                 if state.tool_calls_history:
                     tool_results = "\n".join(
-                        f"[{r['tool']}]: {r['result']}" for r in state.tool_calls_history
+                        f"[{r['tool']}]: {r['result']}"
+                        for r in state.tool_calls_history
                     )
                     state.tool_context = f"【工具返回内容】\n{tool_results}"
                 self.logger.info("Agent生成最终答案")
@@ -495,6 +370,7 @@ class LangGraphQAPipeline:
 
     def _get_openai_tools(self) -> list:
         """获取 OpenAI 格式的工具列表（每次临时连接获取）"""
+
         async def _fetch():
             client = MCPClient(self.llm_caller)
             try:
@@ -527,6 +403,82 @@ class LangGraphQAPipeline:
             tool_calls = last_ai.tool_calls
             self.logger.info(f"执行 {len(tool_calls)} 个工具调用")
 
+            kb_tool_calls = [tc for tc in tool_calls if tc["name"] == "kb_search"]
+            mcp_tool_calls = [tc for tc in tool_calls if tc["name"] != "kb_search"]
+
+            results_map: Dict[str, str] = {}
+
+            if kb_tool_calls:
+
+                async def _run_kb_search():
+                    kb_results = []
+                    for tc in kb_tool_calls:
+                        query = tc["args"].get("query", "")
+                        top_k = tc["args"].get("top_k", 3)
+                        result = await self.kb_tools.kb_search(query, top_k)
+                        kb_results.append(result)
+                        self.logger.info(
+                            f"KB search [{query}] 返回: {result[:200] if result else '(空)'}"
+                        )
+                    return kb_results
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    kb_results = executor.submit(
+                        lambda: asyncio.run(_run_kb_search())
+                    ).result(timeout=30)
+                for tc, result in zip(kb_tool_calls, kb_results):
+                    results_map[tc["id"]] = result
+
+            if mcp_tool_calls:
+
+                async def _run_mcp_tools():
+                    client = MCPClient(self.llm_caller)
+                    try:
+                        project_root = _find_project_root()
+                        server_script = os.path.join(project_root, "mcp_server.py")
+                        await client.connect_to_server(server_script)
+                        return await client.execute_tool_calls(mcp_tool_calls)
+                    finally:
+                        await client.cleanup()
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    mcp_results = executor.submit(
+                        lambda: asyncio.run(_run_mcp_tools())
+                    ).result(timeout=30)
+                for tc, result in zip(mcp_tool_calls, mcp_results):
+                    results_map[tc["id"]] = result
+
+            ordered_results = [results_map[tc["id"]] for tc in tool_calls]
+
+            tool_messages = [
+                ToolMessage(content=result, tool_call_id=tc["id"])
+                for tc, result in zip(tool_calls, ordered_results)
+            ]
+            state.messages += tool_messages
+
+            history = list(state.tool_calls_history)
+            for tc, result in zip(tool_calls, ordered_results):
+                history.append(
+                    {"tool": tc["name"], "args": tc["args"], "result": result}
+                )
+                self.logger.info(
+                    f"工具 [{tc['name']}] 结果: {result[:200] if result else '(空)'}"
+                )
+            state.tool_calls_history = history
+
+            self.logger.info(
+                f"工具调用完成，共 {len(results_map)} 条结果，tool_calls_history 长度: {len(history)}"
+            )
+            return state
+
+        except Exception as e:
+            self.logger.exception(f"工具节点执行失败：{e}")
+            state.error = f"工具节点执行失败：{str(e)}"
+            return state
+
+            tool_calls = last_ai.tool_calls
+            self.logger.info(f"执行 {len(tool_calls)} 个工具调用")
+
             async def _run_tools():
                 client = MCPClient(self.llm_caller)
                 try:
@@ -538,7 +490,9 @@ class LangGraphQAPipeline:
                     await client.cleanup()
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                results = executor.submit(lambda: asyncio.run(_run_tools())).result(timeout=30)
+                results = executor.submit(lambda: asyncio.run(_run_tools())).result(
+                    timeout=30
+                )
 
             tool_messages = [
                 ToolMessage(content=result, tool_call_id=tc["id"])
@@ -548,11 +502,17 @@ class LangGraphQAPipeline:
 
             history = list(state.tool_calls_history)
             for tc, result in zip(tool_calls, results):
-                history.append({"tool": tc["name"], "args": tc["args"], "result": result})
-                self.logger.info(f"工具 [{tc['name']}] 结果: {result[:200] if result else '(空)'}")
+                history.append(
+                    {"tool": tc["name"], "args": tc["args"], "result": result}
+                )
+                self.logger.info(
+                    f"工具 [{tc['name']}] 结果: {result[:200] if result else '(空)'}"
+                )
             state.tool_calls_history = history
 
-            self.logger.info(f"工具调用完成，共 {len(results)} 条结果，tool_calls_history 长度: {len(history)}")
+            self.logger.info(
+                f"工具调用完成，共 {len(results)} 条结果，tool_calls_history 长度: {len(history)}"
+            )
             return state
 
         except Exception as e:
@@ -651,26 +611,6 @@ class LangGraphQAPipeline:
         return state
 
     # =================== 条件判断函数 ===================
-
-    def _should_transform_query(self, state: QAState) -> str:
-        """判断是否需要转换查询"""
-        if state.error:
-            return "error"
-
-        if self.config.retrieve.use_rewrite:
-            return "transform"
-        else:
-            return "skip_transform"
-
-    def _should_retrieve_knowledge(self, state: QAState) -> str:
-        """判断是否需要做知识库查询"""
-        if state.error:
-            return "error"
-
-        if self.config.retrieve.use_kb:
-            return "do_retrieve"
-        else:
-            return "skip_retrieve"
 
     def _should_call_tools(self, state: QAState) -> str:
         """判断是否需要调用工具"""

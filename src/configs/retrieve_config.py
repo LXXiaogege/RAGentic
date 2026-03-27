@@ -23,15 +23,11 @@ class SearchConfig(BaseModel):
         2, gt=0, description="用于计算初始召回：top_k * multiplier"
     )
 
-    # 查询改写
-    use_rewrite: bool = False
-    rewrite_mode: str = Field(
-        "rewrite",
-        description="可选: rewrite / step_back / sub_query / hyde（仅知识库查询下有效）",
-    )
     num_hypo: int = Field(3, ge=1, description="HyDE 模式下，生成假设答案数量")
-    # 知识库
-    use_kb: bool = False
+    use_kb: bool = Field(
+        True,
+        description="知识库工具是否可用（Agent可主动调用kb_search）",
+    )
     use_contextualize_embedding: bool = False
     kb_path: str = Field(
         default="data/knowledge_db/psychology",
@@ -55,8 +51,13 @@ class SearchConfig(BaseModel):
     memory_window_size: int = Field(5, ge=1)
 
     use_think: bool = Field(True, description="是否跳过推理过程（R1）")
-    use_tool: bool = Field(False, description="是否在工具模式下执行")
-    max_agent_iterations: int = Field(10, ge=1, description="Agent工具调用循环最大迭代次数")
+    use_tool: bool = Field(
+        True,
+        description="是否启用Agent工具调用（重Agent架构默认开启）",
+    )
+    max_agent_iterations: int = Field(
+        10, ge=1, description="Agent工具调用循环最大迭代次数"
+    )
 
     extra_body: Dict[str, Any] = Field(
         default_factory=lambda: {"chat_template_kwargs": {"enable_thinking": False}},
