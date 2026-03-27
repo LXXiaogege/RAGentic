@@ -12,6 +12,7 @@
 import asyncio
 import concurrent.futures
 import os
+import threading
 import time
 from functools import wraps
 from typing import Annotated, Any, Callable, Dict, Generator, List, Optional
@@ -195,6 +196,7 @@ class LangGraphQAPipeline:
         )
         self._memory_service: Optional[HybridMemoryService] = None
         self._memory_initialized = False
+        self._init_lock = threading.Lock()
         self.logger.info("记忆服务配置完成，将在首次使用时初始化")
 
     def _build_graph(self):
@@ -263,20 +265,13 @@ class LangGraphQAPipeline:
         """解析查询，设置默认参数"""
         try:
             self.logger.info(f"解析查询：{state.original_query}")
-            defaults = dict(
-                k=self.config.retrieve.top_k,
-                use_sparse=self.config.retrieve.use_sparse,
-                use_reranker=self.config.retrieve.use_reranker,
-                use_knowledge_base=self.config.retrieve.use_kb,
-                use_tools=self.config.retrieve.use_tool,
-                use_memory=self.config.retrieve.use_memory,
-                error=None,
-            )
-            merged = {
-                **defaults,
-                **(state.model_dump() if isinstance(state, BaseModel) else state),
-            }
-            state = QAState(**merged)
+            if state.use_knowledge_base is None:
+                state.use_knowledge_base = self.config.retrieve.use_kb
+            if state.use_tools is None:
+                state.use_tools = self.config.retrieve.use_tool
+            if state.use_memory is None:
+                state.use_memory = self.config.retrieve.use_memory
+            state.error = None
             return state
         except Exception as e:
             self.logger.exception(f"解析查询失败：{e}")
@@ -293,7 +288,6 @@ class LangGraphQAPipeline:
                 f"messages 数量: {len(state.messages)}"
             )
 
-            # 获取工具 schema（需要已连接的 session）
             if self.config.retrieve.use_tool:
                 openai_tools = self._get_openai_tools()
             else:
@@ -344,13 +338,7 @@ class LangGraphQAPipeline:
                     content=raw_message.content or "",
                     tool_calls=lc_tool_calls,
                 )
-                if state.agent_iteration == 0:
-                    state.messages += [
-                        HumanMessage(content=state.original_query),
-                        ai_msg,
-                    ]
-                else:
-                    state.messages += [ai_msg]
+                state.messages += [ai_msg]
                 state.agent_iteration += 1
                 self.logger.info(
                     f"Agent决定调用工具: {[tc['name'] for tc in lc_tool_calls]}"
@@ -358,13 +346,7 @@ class LangGraphQAPipeline:
             else:
                 answer_content = raw_message.content or ""
                 ai_msg = AIMessage(content=answer_content)
-                if state.agent_iteration == 0:
-                    state.messages += [
-                        HumanMessage(content=state.original_query),
-                        ai_msg,
-                    ]
-                else:
-                    state.messages += [ai_msg]
+                state.messages += [ai_msg]
                 state.agent_iteration += 1
                 if state.tool_calls_history:
                     tool_results = "\n".join(
@@ -489,50 +471,6 @@ class LangGraphQAPipeline:
             state.error = f"工具节点执行失败：{str(e)}"
             return state
 
-            tool_calls = last_ai.tool_calls
-            self.logger.info(f"执行 {len(tool_calls)} 个工具调用")
-
-            async def _run_tools():
-                client = MCPClient(self.llm_caller)
-                try:
-                    project_root = _find_project_root()
-                    server_script = os.path.join(project_root, "mcp_server.py")
-                    await client.connect_to_server(server_script)
-                    return await client.execute_tool_calls(tool_calls)
-                finally:
-                    await client.cleanup()
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                results = executor.submit(lambda: asyncio.run(_run_tools())).result(
-                    timeout=30
-                )
-
-            tool_messages = [
-                ToolMessage(content=result, tool_call_id=tc["id"])
-                for tc, result in zip(tool_calls, results)
-            ]
-            state.messages += tool_messages
-
-            history = list(state.tool_calls_history)
-            for tc, result in zip(tool_calls, results):
-                history.append(
-                    {"tool": tc["name"], "args": tc["args"], "result": result}
-                )
-                self.logger.info(
-                    f"工具 [{tc['name']}] 结果: {result[:200] if result else '(空)'}"
-                )
-            state.tool_calls_history = history
-
-            self.logger.info(
-                f"工具调用完成，共 {len(results)} 条结果，tool_calls_history 长度: {len(history)}"
-            )
-            return state
-
-        except Exception as e:
-            self.logger.exception(f"工具节点执行失败：{e}")
-            state.error = f"工具节点执行失败：{str(e)}"
-            return state
-
     @timing_decorator
     def _generate_answer(self, state: QAState) -> QAState:
         """生成答案（use_tool=False 时的纯 LLM 生成路径）"""
@@ -570,9 +508,20 @@ class LangGraphQAPipeline:
             return state
 
     def _ensure_memory_initialized(self) -> None:
-        """确保记忆服务已初始化（同步包装）"""
+        """确保记忆服务已初始化（同步包装，线程安全）"""
         if self._memory_initialized:
             return
+        init_lock = getattr(self, "_init_lock", None)
+        if init_lock:
+            with init_lock:
+                if self._memory_initialized:
+                    return
+                self._init_memory()
+        else:
+            self._init_memory()
+
+    def _init_memory(self) -> None:
+        """实际初始化记忆服务的逻辑"""
         try:
             if self._memory_service is None:
                 user_id = self.config.retrieve.user_id or "default"
@@ -602,19 +551,40 @@ class LangGraphQAPipeline:
 
             if state.kb_context:
                 context_parts.append(state.kb_context)
+            elif state.agent_iteration == 0 and self.config.retrieve.use_kb:
+                query = state.transformed_query or state.original_query
+                try:
+                    kb_results = self.kb_tools.kb_search(
+                        query, top_k=self.config.retrieve.top_k
+                    )
+                    if kb_results:
+                        state.kb_context = kb_results
+                        context_parts.append(kb_results)
+                        self.logger.info(
+                            f"主动检索知识库返回: {kb_results[:200] if kb_results else '(空)'}..."
+                        )
+                except Exception as e:
+                    self.logger.warning(f"知识库检索失败: {e}")
 
             if self.config.retrieve.use_memory and self._memory_settings.enable_ltm:
                 self._ensure_memory_initialized()
                 if self._memory_service and self._memory_service.is_initialized:
                     try:
-                        ltm_results = asyncio.run(
-                            self._memory_service.search(
-                                query=state.original_query,
-                                user_id=self.config.retrieve.user_id or "default",
-                                limit=self._memory_settings.ltm_search_limit,
-                                threshold=self._memory_settings.ltm_search_threshold,
+
+                        def _run_search():
+                            return asyncio.run(
+                                self._memory_service.search(
+                                    query=state.original_query,
+                                    user_id=self.config.retrieve.user_id or "default",
+                                    limit=self._memory_settings.ltm_search_limit,
+                                    threshold=self._memory_settings.ltm_search_threshold,
+                                )
                             )
-                        )
+
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            ltm_results = executor.submit(_run_search).result(
+                                timeout=30
+                            )
                         if ltm_results:
                             ltm_context = self._memory_service.format_ltm_for_context(
                                 ltm_results, prefix="【长期记忆】"
@@ -656,13 +626,18 @@ class LangGraphQAPipeline:
                             if isinstance(m, (HumanMessage, AIMessage))
                             and getattr(m, "content", None)
                         ]
-                        asyncio.run(
-                            self._memory_service.add(
-                                messages=stm_messages,
-                                user_id=user_id,
-                                persist_immediately=True,
+
+                        def _run_add():
+                            return asyncio.run(
+                                self._memory_service.add(
+                                    messages=stm_messages,
+                                    user_id=user_id,
+                                    persist_immediately=True,
+                                )
                             )
-                        )
+
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            executor.submit(_run_add).result(timeout=30)
                         self.logger.info("记忆已存入混合记忆服务")
                     except Exception as e:
                         self.logger.warning(f"存入记忆失败: {e}")
@@ -702,6 +677,8 @@ class LangGraphQAPipeline:
 
         if self.config.retrieve.use_tool:
             return "call_agent"
+        elif self.config.retrieve.use_kb:
+            return "skip_tools"
         else:
             return "skip_tools"
 
