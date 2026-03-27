@@ -246,7 +246,7 @@ except Exception as e:
 
 ### Run Web App
 ```bash
-PYTHONPATH=. uv run python web_app.py
+PYTHONPATH=. uv run python chainlit_app.py
 # Access at http://127.0.0.1:7860
 ```
 

@@ -77,81 +77,6 @@ class TestQAPipelineNodes:
                 assert result.original_query == "测试问题"
                 assert result.error is None
 
-    @pytest.mark.skip(reason="_transform_query 不存在于 LangGraphQAPipeline")
-    def test_transform_query_node_rewrite_enabled(self, config, mock_components):
-        """测试查询转换节点（启用改写）"""
-        config.retrieve.use_rewrite = True
-
-        with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
-            with patch.object(LangGraphQAPipeline, "_build_graph", return_value=None):
-                pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
-                pipeline.config = config
-                pipeline.logger = Mock()
-                pipeline.query_transformer = mock_components["query_transformer"]
-
-                state = QAState(original_query="如何学习 Python？")
-                result = pipeline._transform_query(state)
-
-                assert result.transformed_query == "转换后的查询"
-                mock_components[
-                    "query_transformer"
-                ].transform_query.assert_called_once()
-
-    @pytest.mark.skip(reason="_transform_query 不存在于 LangGraphQAPipeline")
-    def test_transform_query_node_rewrite_disabled(self, config, mock_components):
-        """测试查询转换节点（禁用改写）"""
-        config.retrieve.use_rewrite = False
-
-        with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
-            with patch.object(LangGraphQAPipeline, "_build_graph", return_value=None):
-                pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
-                pipeline.config = config
-                pipeline.logger = Mock()
-
-                state = QAState(original_query="测试问题")
-                result = pipeline._transform_query(state)
-
-                assert result.transformed_query == ""
-
-    @pytest.mark.skip(reason="_retrieve_knowledge 不存在于 LangGraphQAPipeline")
-    def test_retrieve_knowledge_node_disabled(self, config, mock_components):
-        """测试知识检索节点（禁用 KB）"""
-        config.retrieve.use_kb = False
-
-        with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
-            with patch.object(LangGraphQAPipeline, "_build_graph", return_value=None):
-                pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
-                pipeline.config = config
-                pipeline.logger = Mock()
-
-                state = QAState(original_query="测试")
-                result = pipeline._retrieve_knowledge(state)
-
-                assert result.kb_context == ""
-
-    @pytest.mark.skip(reason="_retrieve_knowledge 不存在于 LangGraphQAPipeline")
-    def test_retrieve_knowledge_node_enabled(self, config, mock_components):
-        """测试知识检索节点（启用 KB）"""
-        config.retrieve.use_kb = True
-
-        with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
-            with patch.object(LangGraphQAPipeline, "_build_graph", return_value=None):
-                pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
-                pipeline.config = config
-                pipeline.logger = Mock()
-                pipeline.db_connection_manager = mock_components["db_manager"]
-                pipeline.query_transformer = mock_components["query_transformer"]
-
-                state = QAState(
-                    original_query="RAG 是什么", transformed_query="RAG 技术"
-                )
-                result = pipeline._retrieve_knowledge(state)
-
-                assert (
-                    "知识库检索内容" in result.kb_context
-                    or "未检索到" in result.kb_context
-                )
-
     def test_agent_node_no_tools_disabled(self, config, mock_components):
         """测试工具禁用时 agent_node 不会被调用（_should_call_tools 路由到 build_context）"""
         config.retrieve.use_tool = False
@@ -185,37 +110,6 @@ class TestQAPipelineNodes:
                     "工具结果" in result.final_context
                     or "文档 1" in result.final_context
                 )
-
-    @pytest.mark.skip(reason="_agent_node 依赖完整的组件初始化，测试不完整")
-    def test_agent_node_generates_answer(self, config, mock_components):
-        """测试 agent_node 无 tool_calls 时直接生成答案"""
-        from unittest.mock import MagicMock
-        from langchain_core.messages import AIMessage
-
-        with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
-            with patch.object(LangGraphQAPipeline, "_build_graph", return_value=None):
-                pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
-                pipeline.config = config
-                pipeline.logger = Mock()
-                pipeline.llm_caller = mock_components["llm"]
-
-                # mock LLM 返回无 tool_calls 的响应
-                mock_response = MagicMock()
-                mock_response.choices[0].message.tool_calls = None
-                mock_response.choices[0].message.content = "这是模拟答案"
-                mock_components["llm"].chat.return_value = mock_response
-
-                # mock MCP client
-                pipeline.mcp_client = mock_components["mcp_client"]
-                pipeline.mcp_client._convert_mcp_tools_to_openai_format.return_value = []
-
-                state = QAState(original_query="测试问题", final_context="上下文信息")
-                result = pipeline._agent_node(state)
-
-                assert len(result.messages) > 0
-                assert result.error is None
-                ai_msgs = [m for m in result.messages if isinstance(m, AIMessage)]
-                assert len(ai_msgs) > 0
 
     def test_update_memory_node_enabled(self, config, mock_components):
         """测试记忆更新节点（启用）"""
@@ -273,44 +167,6 @@ class TestQAPipelineNodes:
 
 class TestQAPipelineConditionalEdges:
     """条件边测试"""
-
-    @pytest.mark.skip(reason="_should_transform_query 不存在于 LangGraphQAPipeline")
-    def test_should_transform_query(self, config):
-        """测试查询转换条件判断"""
-        with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
-            with patch.object(LangGraphQAPipeline, "_build_graph", return_value=None):
-                pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
-                pipeline.config = config
-
-                # 启用改写
-                config.retrieve.use_rewrite = True
-                state = QAState(original_query="测试")
-                assert pipeline._should_transform_query(state) == "transform"
-
-                # 禁用改写
-                config.retrieve.use_rewrite = False
-                assert pipeline._should_transform_query(state) == "skip_transform"
-
-                # 有错误
-                state.error = "错误"
-                assert pipeline._should_transform_query(state) == "error"
-
-    @pytest.mark.skip(reason="_should_retrieve_knowledge 不存在于 LangGraphQAPipeline")
-    def test_should_retrieve_knowledge(self, config):
-        """测试知识检索条件判断"""
-        with patch.object(LangGraphQAPipeline, "_init_components", return_value=None):
-            with patch.object(LangGraphQAPipeline, "_build_graph", return_value=None):
-                pipeline = LangGraphQAPipeline.__new__(LangGraphQAPipeline)
-                pipeline.config = config
-
-                # 启用 KB
-                config.retrieve.use_kb = True
-                state = QAState(original_query="测试")
-                assert pipeline._should_retrieve_knowledge(state) == "do_retrieve"
-
-                # 禁用 KB
-                config.retrieve.use_kb = False
-                assert pipeline._should_retrieve_knowledge(state) == "skip_retrieve"
 
     def test_should_call_tools(self, config):
         """测试工具调用条件判断"""

@@ -42,8 +42,8 @@ venv.bak/
 # Claude Code local config
 .claude/
 
-# GitHub Actions workflows (local only)
-.github/
+# GitHub Actions workflows
+!.github/
 
 # Jupyter Notebook
 .ipynb_checkpoints
