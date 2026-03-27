@@ -11,11 +11,10 @@ from src.cores.message_builder import MessageBuilder
 @pytest.fixture
 def config():
     """测试配置"""
-    config = Mock(spec=MessageBuilderConfig)
-    config.max_context_length = 4000
-    config.system_prompt = "你是一个助手"
-    config.use_rag_system_prompt = True
-    config.rag_system_prompt = "你是一个 RAG 助手"
+    config = MessageBuilderConfig(
+        message_builder_model="gpt-3.5-turbo",
+        message_max_tokens=3500,
+    )
     return config
 
 
@@ -26,122 +25,84 @@ class TestMessageBuilder:
         """测试初始化"""
         builder = MessageBuilder(config)
 
-        assert builder.max_context_length == 4000
+        assert builder.model_name == "gpt-3.5-turbo"
         assert builder.tokenizer is not None
 
-    def test_build_context_empty(self, config):
-        """测试空上下文构建"""
+    def test_build_with_no_context(self, config):
+        """测试无上下文构建"""
         builder = MessageBuilder(config)
 
-        result = builder.build_context([])
+        result = builder.build(query="测试问题")
 
-        assert result == ""
+        assert len(result) == 2
+        assert result[0]["role"] == "system"
+        assert result[1]["role"] == "user"
+        assert "测试问题" in result[1]["content"]
 
-    def test_build_context_single_doc(self, config):
-        """测试单个文档构建"""
+    def test_build_with_context(self, config):
+        """测试带上下文构建"""
         builder = MessageBuilder(config)
-        docs = [{"text": "文档内容", "score": 0.9}]
 
-        result = builder.build_context(docs)
+        result = builder.build(query="测试问题", context="相关文档内容")
 
-        assert "文档内容" in result
-        assert "0.9" in result or "相关性" in result
+        assert len(result) == 2
+        assert "相关文档内容" in result[1]["content"]
+        assert "测试问题" in result[1]["content"]
 
-    def test_build_context_multiple_docs(self, config):
-        """测试多个文档构建"""
+    def test_build_with_stm(self, config):
+        """测试带短期记忆构建"""
         builder = MessageBuilder(config)
-        docs = [
-            {"text": "文档 1", "score": 0.9},
-            {"text": "文档 2", "score": 0.8},
-            {"text": "文档 3", "score": 0.7},
+        stm = [
+            {"role": "user", "content": "之前的问题"},
+            {"role": "assistant", "content": "之前的回答"},
         ]
 
-        result = builder.build_context(docs)
+        result = builder.build(query="新问题", stm=stm)
 
-        assert "文档 1" in result
-        assert "文档 2" in result
-        assert "文档 3" in result
+        assert len(result) == 4
+        assert result[1]["content"] == "之前的问题"
+        assert result[2]["content"] == "之前的回答"
 
-    def test_build_context_truncation(self, config):
-        """测试上下文截断"""
+    def test_build_with_ltm(self, config):
+        """测试带长期记忆构建"""
         builder = MessageBuilder(config)
-        long_text = "这是很长的文本 " * 1000
-        docs = [{"text": long_text, "score": 0.9}]
+        ltm = ["用户喜欢咖啡", "用户住在上海"]
 
-        result = builder.build_context(docs)
+        result = builder.build(query="新问题", ltm=ltm)
 
-        assert len(result) <= config.max_context_length
+        assert len(result) == 3
+        assert "长期记忆" in result[1]["content"]
+        assert "用户喜欢咖啡" in result[1]["content"]
 
-    def test_format_doc_with_metadata(self, config):
-        """测试带元数据的文档格式化"""
-        builder = MessageBuilder(config)
-        doc = {
-            "text": "测试内容",
-            "score": 0.95,
-            "source": "test.pdf",
-            "page": 10,
-        }
-
-        result = builder._format_doc(doc)
-
-        assert "测试内容" in result
-        assert "test.pdf" in result or "10" in result
-
-    def test_format_doc_minimal(self, config):
-        """测试最小文档格式化"""
-        builder = MessageBuilder(config)
-        doc = {"text": "简单内容"}
-
-        result = builder._format_doc(doc)
-
-        assert "简单内容" in result
-
-    def test_estimate_tokens(self, config):
-        """测试 token 估算"""
+    def test_num_tokens(self, config):
+        """测试 token 计数"""
         builder = MessageBuilder(config)
         text = "这是一个测试文本"
 
-        tokens = builder._estimate_tokens(text)
+        tokens = builder.num_tokens(text)
 
         assert tokens > 0
         assert isinstance(tokens, int)
 
-    def test_truncate_to_token_limit(self, config):
-        """测试 token 限制截断"""
+
+@pytest.mark.skip(reason="build_context 方法不存在于 MessageBuilder")
+class TestMessageBuilderBuildContext:
+    """build_context 方法测试（已废弃）"""
+
+    def test_build_context_empty(self, config):
+        """测试空上下文构建"""
         builder = MessageBuilder(config)
-        long_text = "测试 " * 2000
-
-        truncated = builder._truncate_to_token_limit(long_text, max_tokens=100)
-
-        assert len(truncated) < len(long_text)
-        assert builder._estimate_tokens(truncated) <= 100
+        result = builder.build_context([])
+        assert result == ""
 
 
+@pytest.mark.skip(reason="get_system_prompt 方法不存在于 MessageBuilder")
 class TestMessageBuilderSystemPrompt:
-    """系统提示测试"""
+    """系统提示测试（已废弃）"""
 
     def test_get_system_prompt_rag_enabled(self, config):
         """测试 RAG 模式系统提示"""
         config.use_rag_system_prompt = True
         builder = MessageBuilder(config)
-
         prompt = builder.get_system_prompt(use_rag=True)
-
         assert prompt == config.rag_system_prompt
-
-    def test_get_system_prompt_rag_disabled(self, config):
-        """测试非 RAG 模式系统提示"""
-        builder = MessageBuilder(config)
-
-        prompt = builder.get_system_prompt(use_rag=False)
-
-        assert prompt == config.system_prompt
-
-    def test_get_system_prompt_custom(self, config):
-        """测试自定义系统提示"""
-        builder = MessageBuilder(config)
-        custom_prompt = "自定义提示"
-
-        prompt = builder.get_system_prompt(use_rag=False, custom_prompt=custom_prompt)
-
-        assert prompt == custom_prompt

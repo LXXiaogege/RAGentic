@@ -5,6 +5,7 @@
 @File ：mem0_manager.py
 @IDE ：PyCharm
 """
+
 from typing import Dict, Optional, Any, List, Union
 from mem0 import AsyncMemory
 from src.memory.memory_adapter import adapt_appconfig_to_mem0
@@ -48,7 +49,7 @@ class Mem0Manager:
                 messages="__init__",
                 user_id=system_user,
                 infer=False,
-                metadata={"init": True}
+                metadata={"init": True},
             )
             # 获取 id 并删除掉
             mem_id = res["results"][0]["id"]
@@ -59,15 +60,15 @@ class Mem0Manager:
         return user_id if user_id is not None else self.default_user_id
 
     async def add(
-            self,
-            messages: Union[str, List[Dict[str, str]]],
-            user_id: Optional[str] = None,
-            agent_id: Optional[str] = None,
-            run_id: Optional[str] = None,
-            metadata: Optional[Dict[str, Any]] = None,
-            infer: bool = False,
-            memory_type: Optional[str] = None,
-            prompt: Optional[str] = None,
+        self,
+        messages: Union[str, List[Dict[str, str]]],
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        infer: bool = False,
+        memory_type: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         添加新记忆。
@@ -95,7 +96,7 @@ class Mem0Manager:
             metadata=metadata,
             infer=infer,
             memory_type=memory_type,
-            prompt=prompt
+            prompt=prompt,
         )
 
     async def get(self, memory_id: str) -> Optional[Dict[str, Any]]:
@@ -106,12 +107,12 @@ class Mem0Manager:
         return await self.m.get(memory_id)
 
     async def get_all(
-            self,
-            user_id: Optional[str] = None,
-            agent_id: Optional[str] = None,
-            run_id: Optional[str] = None,
-            filters: Optional[Dict[str, Any]] = None,
-            limit: int = 10
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """
         获取所有记忆列表
@@ -132,7 +133,7 @@ class Mem0Manager:
             agent_id=agent_id,
             run_id=run_id,
             filters=filters,
-            limit=limit
+            limit=limit,
         )
         return res.get("results", [])
 
@@ -155,10 +156,10 @@ class Mem0Manager:
         return await self.m.delete(memory_id=memory_id)
 
     async def delete_all(
-            self,
-            user_id: Optional[str] = None,
-            agent_id: Optional[str] = None,
-            run_id: Optional[str] = None
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         删除指定范围内的所有记忆
@@ -170,9 +171,7 @@ class Mem0Manager:
         """
         self._ensure_initialized()
         return await self.m.delete_all(
-            user_id=self._get_user_id(user_id),
-            agent_id=agent_id,
-            run_id=run_id
+            user_id=self._get_user_id(user_id), agent_id=agent_id, run_id=run_id
         )
 
     async def memory_history(self, memory_id: str) -> List[Dict[str, Any]]:
@@ -190,14 +189,14 @@ class Mem0Manager:
         await self.m.reset()
 
     async def search(
-            self,
-            query: str,
-            user_id: Optional[str] = None,
-            agent_id: Optional[str] = None,
-            run_id: Optional[str] = None,
-            limit: int = 100,
-            filters: Optional[Dict[str, Any]] = None,
-            threshold: Optional[float] = None
+        self,
+        query: str,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        limit: int = 100,
+        filters: Optional[Dict[str, Any]] = None,
+        threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         基于查询搜索相关记忆
@@ -222,5 +221,5 @@ class Mem0Manager:
             run_id=run_id,
             limit=limit,
             filters=filters,
-            threshold=threshold
+            threshold=threshold,
         )

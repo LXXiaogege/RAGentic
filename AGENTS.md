@@ -65,6 +65,59 @@ parse_query → check_call_tools
 ### State Management
 State flows as `QAState` (TypedDict) through all nodes. Conditional edge `check_call_tools` decides whether to enter agent loop based on `config.retrieve.use_tool`.
 
+## 🧠 Memory Architecture (分层记忆)
+
+### 架构概览
+```
+HybridMemoryService (统一接口)
+├── ShortTermMemory (短期记忆 - 滑动窗口)
+│   └── LangGraph Checkpoint (跨请求状态保持)
+└── LongTermMemory (长期记忆 - Mem0)
+    └── Milvus 向量存储 + SQLite 历史
+```
+
+### 核心组件 (`src/memory/`)
+| 文件 | 说明 |
+|------|------|
+| `base.py` | 抽象基类 `MemoryService`, `ShortTermMemory`, `LongTermMemory` |
+| `short_term_memory.py` | 短期记忆实现（deque 滑动窗口 + Checkpoint） |
+| `long_term_memory.py` | 长期记忆封装（封装 Mem0Manager） |
+| `hybrid_memory_service.py` | 混合记忆服务，统一管理 STM + LTM |
+| `mem0_manager.py` | Mem0 原生接口封装 |
+| `memory_adapter.py` | AppConfig → Mem0 配置适配器 |
+
+### 配置 (`src/configs/memory_settings.py`)
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `service_type` | `hybrid` | 服务类型: hybrid / stm_only / ltm_only |
+| `stm_window_size` | `10` | 短期记忆窗口大小 |
+| `ltm_persist_threshold` | `3` | 刷写到 LTM 的阈值（轮数） |
+| `enable_stm` | `True` | 是否启用短期记忆 |
+| `enable_ltm` | `True` | 是否启用长期记忆 |
+
+### Pipeline 集成
+- **`_build_context`**: 搜索 LTM 相关记忆加入上下文
+- **`_update_memory`**: 消息先存 STM，积累阈值后刷 LTM
+
+### 使用方式
+```python
+# Pipeline 自动集成，无需手动调用
+result = pipeline.ask("你好", use_memory=True)
+
+# 直接使用 HybridMemoryService
+from src.memory.hybrid_memory_service import HybridMemoryService
+memory = HybridMemoryService(config, user_id="user123")
+await memory.initialize()
+await memory.add(messages=[...], user_id="user123")
+results = await memory.search(query="用户信息", user_id="user123")
+```
+
+### 关键特性
+- **分层记忆**: STM 快速访问 + LTM 持久化
+- **智能刷写**: `ltm_persist_threshold` 控制何时刷 LTM
+- **懒初始化**: 首次使用时初始化记忆服务
+- **向后兼容**: `use_memory=True` 保持原有行为
+
 ## 🧪 Testing
 
 ### Run Tests

@@ -29,11 +29,13 @@ from pydantic import BaseModel
 
 from src.configs.config import AppConfig
 from src.configs.logger_config import setup_logger
+from src.configs.memory_settings import MemorySettings
 from src.cores.message_builder import MessageBuilder
 from src.cores.query_transformer import QueryTransformer
 from src.db_services.milvus.connection_manager import MilvusConnectionManager
 from src.mcp.mcp_client import MCPClient, _find_project_root
 from src.mcp.server.kb_tools import KBTools
+from src.memory.hybrid_memory_service import HybridMemoryService
 from src.models.embedding import TextEmbedding
 from src.models.llm import LLMWrapper
 from src.skills.skill_manager import SkillManager
@@ -183,6 +185,17 @@ class LangGraphQAPipeline:
                 self.logger.info("Langfuse 客户端初始化完成")
             except Exception as e:
                 self.logger.warning(f"Langfuse 客户端初始化失败: {e}")
+
+        # 混合记忆服务
+        self._memory_settings = MemorySettings(
+            stm_window_size=self.config.retrieve.memory_window_size,
+            enable_ltm=getattr(self.config.memory, "enable_ltm", True)
+            if hasattr(self.config, "memory")
+            else True,
+        )
+        self._memory_service: Optional[HybridMemoryService] = None
+        self._memory_initialized = False
+        self.logger.info("记忆服务配置完成，将在首次使用时初始化")
 
     def _build_graph(self):
         """构建LangGraph工作流"""
@@ -556,6 +569,27 @@ class LangGraphQAPipeline:
             state.error = f"生成答案失败：{str(e)}"
             return state
 
+    def _ensure_memory_initialized(self) -> None:
+        """确保记忆服务已初始化（同步包装）"""
+        if self._memory_initialized:
+            return
+        try:
+            if self._memory_service is None:
+                user_id = self.config.retrieve.user_id or "default"
+                self._memory_service = HybridMemoryService(
+                    config=self.config,
+                    user_id=user_id,
+                    stm_window_size=self._memory_settings.stm_window_size,
+                    ltm_persist_threshold=self._memory_settings.ltm_persist_threshold,
+                    enable_stm=self._memory_settings.enable_stm,
+                    enable_ltm=self._memory_settings.enable_ltm,
+                )
+            asyncio.run(self._memory_service.initialize())
+            self._memory_initialized = True
+            self.logger.info("记忆服务初始化完成")
+        except Exception as e:
+            self.logger.warning(f"记忆服务初始化失败: {e}，将使用简单记忆模式")
+
     def _build_context(self, state: QAState) -> QAState:
         """构建最终上下文"""
         try:
@@ -568,6 +602,29 @@ class LangGraphQAPipeline:
 
             if state.kb_context:
                 context_parts.append(state.kb_context)
+
+            if self.config.retrieve.use_memory and self._memory_settings.enable_ltm:
+                self._ensure_memory_initialized()
+                if self._memory_service and self._memory_service.is_initialized:
+                    try:
+                        ltm_results = asyncio.run(
+                            self._memory_service.search(
+                                query=state.original_query,
+                                user_id=self.config.retrieve.user_id or "default",
+                                limit=self._memory_settings.ltm_search_limit,
+                                threshold=self._memory_settings.ltm_search_threshold,
+                            )
+                        )
+                        if ltm_results:
+                            ltm_context = self._memory_service.format_ltm_for_context(
+                                ltm_results, prefix="【长期记忆】"
+                            )
+                            context_parts.append(ltm_context)
+                            self.logger.info(
+                                f"添加 {len(ltm_results)} 条长期记忆到上下文"
+                            )
+                    except Exception as e:
+                        self.logger.warning(f"搜索长期记忆失败: {e}")
 
             state.final_context = "\n\n".join(context_parts)
             self.logger.info(f"上下文构建完成，长度：{len(state.final_context)}")
@@ -584,6 +641,32 @@ class LangGraphQAPipeline:
         """更新记忆"""
         try:
             if self.config.retrieve.use_memory and state.messages:
+                self._ensure_memory_initialized()
+                if self._memory_service and self._memory_service.is_initialized:
+                    try:
+                        user_id = self.config.retrieve.user_id or "default"
+                        stm_messages = [
+                            {
+                                "role": "user"
+                                if isinstance(m, HumanMessage)
+                                else "assistant",
+                                "content": m.content,
+                            }
+                            for m in state.messages
+                            if isinstance(m, (HumanMessage, AIMessage))
+                            and getattr(m, "content", None)
+                        ]
+                        asyncio.run(
+                            self._memory_service.add(
+                                messages=stm_messages,
+                                user_id=user_id,
+                                persist_immediately=True,
+                            )
+                        )
+                        self.logger.info("记忆已存入混合记忆服务")
+                    except Exception as e:
+                        self.logger.warning(f"存入记忆失败: {e}")
+
                 max_history = self.config.retrieve.memory_window_size
                 state.messages = state.messages[-max_history:]
                 self.logger.info(f"记忆更新完成，当前历史消息数：{len(state.messages)}")
