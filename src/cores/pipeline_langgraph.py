@@ -824,7 +824,7 @@ class LangGraphQAPipeline:
                     },
                 }
 
-                if node_name in ("agent_node", "generate_answer"):
+                if node_name in ("agent_node", "generate_answer", "build_context"):
                     messages = _get("messages") or []
                     ai_msgs = [
                         msg.content
