@@ -4,25 +4,27 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
 # 创建logs目录
-LOGS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
+LOGS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "logs"
+)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 # 日志文件路径
-LOG_FILE = os.path.join(LOGS_DIR, f'app_{datetime.now().strftime("%Y%m%d")}.log')
+LOG_FILE = os.path.join(LOGS_DIR, f"app_{datetime.now().strftime('%Y%m%d')}.log")
 
 # 日志格式
-LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def setup_logger(name: str, level=logging.INFO):
     """
     设置日志记录器
-    
+
     Args:
         name: 日志记录器名称
         level: 日志级别
-        
+
     Returns:
         logging.Logger: 配置好的日志记录器
     """
@@ -44,7 +46,7 @@ def setup_logger(name: str, level=logging.INFO):
         LOG_FILE,
         maxBytes=10 * 1024 * 1024,  # 10MB
         backupCount=5,
-        encoding='utf-8'
+        encoding="utf-8",
     )
     file_handler.setLevel(level)
     file_formatter = logging.Formatter(LOG_FORMAT, DATE_FORMAT)

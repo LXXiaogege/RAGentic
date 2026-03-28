@@ -38,7 +38,9 @@ class SkillManager:
                 self._skills[meta.name] = meta
                 logger.debug(f"加载 skill：{meta.name} - {meta.description}")
 
-        logger.info(f"共加载 {len(self._skills)} 个 skills：{list(self._skills.keys())}")
+        logger.info(
+            f"共加载 {len(self._skills)} 个 skills：{list(self._skills.keys())}"
+        )
 
     def _parse_frontmatter(self, file_path: Path) -> Optional[SkillMeta]:
         """解析 md 文件的 YAML frontmatter，提取 name 和 description"""
@@ -69,7 +71,9 @@ class SkillManager:
                 logger.warning(f"skill 文件缺少 name 或 description：{file_path}")
                 return None
 
-            return SkillMeta(name=name, description=description, file_path=str(file_path))
+            return SkillMeta(
+                name=name, description=description, file_path=str(file_path)
+            )
 
         except Exception as e:
             logger.warning(f"解析 skill 文件失败 {file_path}：{e}")
@@ -103,7 +107,7 @@ class SkillManager:
             if content.startswith("---"):
                 end = content.find("---", 3)
                 if end != -1:
-                    return content[end + 3:].strip()
+                    return content[end + 3 :].strip()
             return content.strip()
         except Exception as e:
             logger.warning(f"读取 skill 正文失败 {name}：{e}")

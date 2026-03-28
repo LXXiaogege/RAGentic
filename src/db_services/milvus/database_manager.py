@@ -5,6 +5,7 @@
 @File ：database_manager.py.py
 @IDE ：PyCharm
 """
+
 from src.configs.logger_config import setup_logger
 
 from pymilvus import MilvusClient

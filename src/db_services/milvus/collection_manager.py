@@ -5,10 +5,12 @@
 @File ：collection_manager.py
 @IDE ：PyCharm
 """
+
 from pymilvus import DataType
 
 from src.configs.logger_config import setup_logger
 from src.db_services.milvus.database_manager import MilvusDBManager
+
 logger = setup_logger(__name__)
 
 
@@ -22,7 +24,7 @@ def auto_index_params(field: dict):
             "index_name": f"{name}_dense_idx",
             "index_type": "AUTOINDEX",
             "metric_type": "COSINE",
-            "params": {}
+            "params": {},
         }
 
     # 稀疏向量（BM25）
@@ -32,7 +34,7 @@ def auto_index_params(field: dict):
             "index_name": f"{name}_sparse_idx",
             "index_type": "SPARSE_INVERTED_INDEX",
             "metric_type": "IP",
-            "params": {"drop_ratio_build": bm25_drop_ratio}
+            "params": {"drop_ratio_build": bm25_drop_ratio},
         }
 
     # 主键
@@ -40,7 +42,7 @@ def auto_index_params(field: dict):
         return {
             "index_name": f"{name}_pk_idx",
             "index_type": "INVERTED_INDEX",
-            "params": {}
+            "params": {},
         }
 
     # 其他字段不创建索引
@@ -63,7 +65,7 @@ class MilvusCollectionManager:
         # 2) 创建空 schema
         schema_obj = self.client.create_schema(
             auto_id=schema.get("auto_id", True),
-            enable_dynamic_fields=schema.get("enable_dynamic_fields", False)
+            enable_dynamic_fields=schema.get("enable_dynamic_fields", False),
         )
         # 3) 添加字段到schema
         index_fields = []  # 用于后续自动创建索引
@@ -73,16 +75,13 @@ class MilvusCollectionManager:
 
             if dtype == "FLOAT_VECTOR":
                 schema_obj.add_field(
-                    field_name=name,
-                    datatype=DataType.FLOAT_VECTOR,
-                    dim=field["dim"]
+                    field_name=name, datatype=DataType.FLOAT_VECTOR, dim=field["dim"]
                 )
                 index_fields.append(("dense", name))
 
             elif dtype == "SPARSE_FLOAT_VECTOR":
                 schema_obj.add_field(
-                    field_name=name,
-                    datatype=DataType.SPARSE_FLOAT_VECTOR
+                    field_name=name, datatype=DataType.SPARSE_FLOAT_VECTOR
                 )
                 index_fields.append(("sparse", name))
 
@@ -91,7 +90,7 @@ class MilvusCollectionManager:
                     field_name=name,
                     datatype=DataType.VARCHAR,
                     max_length=field["max_length"],
-                    is_primary=field.get("is_primary", False)
+                    is_primary=field.get("is_primary", False),
                 )
                 if field.get("is_primary", False):
                     index_fields.append(("primary", name))
@@ -111,7 +110,9 @@ class MilvusCollectionManager:
         for field in schema["fields"]:
             # 跳过主键字段（主键会自动创建索引）
             if field.get("is_primary", False):
-                self.logger.debug(f"字段 [{field['name']}] 是主键，跳过索引创建（主键会自动创建索引）")
+                self.logger.debug(
+                    f"字段 [{field['name']}] 是主键，跳过索引创建（主键会自动创建索引）"
+                )
                 continue
 
             idx_params = auto_index_params(field)
@@ -146,30 +147,29 @@ class MilvusCollectionManager:
         }
         """
         self.logger.info(f"为字段 [{field_name}] 创建索引...")
-        
+
         # 将字典转换为 IndexParams 对象
         index_params_obj = self.client.prepare_index_params()
-        
+
         # 构建 add_index 参数
         add_index_kwargs = {
             "field_name": field_name,
             "index_type": index_params_dict.get("index_type"),
-            "params": index_params_dict.get("params", {})
+            "params": index_params_dict.get("params", {}),
         }
-        
+
         # 添加可选的 index_name
         if "index_name" in index_params_dict:
             add_index_kwargs["index_name"] = index_params_dict["index_name"]
-        
+
         # 添加 metric_type（仅向量字段需要）
         if "metric_type" in index_params_dict:
             add_index_kwargs["metric_type"] = index_params_dict["metric_type"]
-        
+
         index_params_obj.add_index(**add_index_kwargs)
-        
+
         # 创建索引
         self.client.create_index(
-            collection_name=collection_name,
-            index_params=index_params_obj
+            collection_name=collection_name, index_params=index_params_obj
         )
         self.logger.info(f"索引创建成功: {collection_name}.{field_name}")

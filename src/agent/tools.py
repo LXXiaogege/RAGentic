@@ -5,6 +5,7 @@
 @File ：tools.py
 @IDE ：PyCharm
 """
+
 import requests
 from lxml import html
 from typing import Dict, List
@@ -33,7 +34,7 @@ class WebSpider:
         :param text: 原始文本
         :return: 清理后的文本
         """
-        cleaned = text.replace('\t', '').replace('\n', '').replace('\r', '').strip()
+        cleaned = text.replace("\t", "").replace("\n", "").replace("\r", "").strip()
         self.logger.debug(f"清理文本: 原始长度={len(text)}, 清理后长度={len(cleaned)}")
         return cleaned
 
@@ -67,56 +68,62 @@ class WebSpider:
         try:
             # 发送HTTP请求
             self.logger.debug(f"发送HTTP请求: {url}")
-            response = requests.get(url, headers=self.default_headers, timeout=self.timeout)
+            response = requests.get(
+                url, headers=self.default_headers, timeout=self.timeout
+            )
             response.encoding = response.apparent_encoding
             tree = html.fromstring(response.text)
 
             # 提取标题
-            title_list = tree.xpath('/html/head/title/text()')
-            title = self._clean_text(title_list[0]) if title_list else ''
+            title_list = tree.xpath("/html/head/title/text()")
+            title = self._clean_text(title_list[0]) if title_list else ""
             self.logger.debug(f"提取到标题: {title[:50]}...")
 
             # 提取正文文本
-            text_list = tree.xpath('//text()[not(ancestor::script) and not(ancestor::style) and not(ancestor::meta)]')
+            text_list = tree.xpath(
+                "//text()[not(ancestor::script) and not(ancestor::style) and not(ancestor::meta)]"
+            )
             text_list = [self._clean_text(x) for x in text_list if x.strip()]
-            text_list = [x for x in text_list if x != '\n' and x != '|'
-                         and not x.startswith('<style')
-                         and not x.startswith('<meta')
-                         and not x.startswith('<script')]
+            text_list = [
+                x
+                for x in text_list
+                if x != "\n"
+                and x != "|"
+                and not x.startswith("<style")
+                and not x.startswith("<meta")
+                and not x.startswith("<script")
+            ]
 
             if len(text_list) > 1:
                 text_list = text_list[1:]
 
-            text = ' '.join(text_list)
+            text = " ".join(text_list)
             self.logger.debug(f"提取到正文，长度: {len(text)}")
 
-            result = {
-                'title': title,
-                'content': text,
-                'url': url,
-                'status': 'success'
-            }
+            result = {"title": title, "content": text, "url": url, "status": "success"}
 
-            self.logger.info(f"成功爬取页面: {url}, 标题长度: {len(title)}, 内容长度: {len(text)}")
+            self.logger.info(
+                f"成功爬取页面: {url}, 标题长度: {len(title)}, 内容长度: {len(text)}"
+            )
             return result
 
         except requests.exceptions.RequestException as e:
             self.logger.error(f"请求失败: {url}, 错误: {str(e)}")
             return {
-                'title': '',
-                'content': '',
-                'url': url,
-                'status': 'error',
-                'error': str(e)
+                "title": "",
+                "content": "",
+                "url": url,
+                "status": "error",
+                "error": str(e),
             }
         except Exception as e:
             self.logger.error(f"解析失败: {url}, 错误: {str(e)}")
             return {
-                'title': '',
-                'content': '',
-                'url': url,
-                'status': 'error',
-                'error': str(e)
+                "title": "",
+                "content": "",
+                "url": url,
+                "status": "error",
+                "error": str(e),
             }
 
     def batch_crawl(self, urls: List[str]) -> List[Dict]:
@@ -131,7 +138,9 @@ class WebSpider:
             self.logger.info(f"正在爬取第 {i}/{len(urls)} 个URL: {url}")
             result = self.crawl_page(url)
             results.append(result)
-        self.logger.info(f"批量爬取完成，成功数量: {len([r for r in results if r['status'] == 'success'])}")
+        self.logger.info(
+            f"批量爬取完成，成功数量: {len([r for r in results if r['status'] == 'success'])}"
+        )
         return results
 
     @observe(name="WebSpider.run", as_type="tool")

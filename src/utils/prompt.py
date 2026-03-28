@@ -25,11 +25,11 @@ class PromptManager:
     """
 
     def __init__(
-            self,
-            langfuse_client=None,
-            config: Optional[object] = None,
-            strategy: str = "langfuse_first",
-            default_cache_ttl: int = 300,  # 默认缓存 5 分钟
+        self,
+        langfuse_client=None,
+        config: Optional[object] = None,
+        strategy: str = "langfuse_first",
+        default_cache_ttl: int = 300,  # 默认缓存 5 分钟
     ):
         """
         初始化 PromptManager
@@ -48,15 +48,15 @@ class PromptManager:
 
     # ----------------------------------------------------------------------
     def get_prompt(
-            self,
-            name: str,
-            *,
-            version: Optional[int] = None,
-            label: Optional[str] = None,
-            type: Literal["chat", "text"] = "text",
-            fallback: Optional[Union[str, list]] = None,
-            cache_ttl_seconds: Optional[int] = None,
-            compile_vars: Optional[Dict[str, Any]] = None,
+        self,
+        name: str,
+        *,
+        version: Optional[int] = None,
+        label: Optional[str] = None,
+        type: Literal["chat", "text"] = "text",
+        fallback: Optional[Union[str, list]] = None,
+        cache_ttl_seconds: Optional[int] = None,
+        compile_vars: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
         获取指定名称的 Prompt。
@@ -76,14 +76,12 @@ class PromptManager:
 
         # 优先级策略
         if self.strategy == "langfuse_first":
-            prompt_text = (
-                    self._try_langfuse(name, version, label, type, fallback, ttl, compile_vars)
-                    or self._try_local(name, compile_vars)
-            )
+            prompt_text = self._try_langfuse(
+                name, version, label, type, fallback, ttl, compile_vars
+            ) or self._try_local(name, compile_vars)
         else:  # local_first
-            prompt_text = (
-                    self._try_local(name, compile_vars)
-                    or self._try_langfuse(name, version, label, type, fallback, ttl, compile_vars)
+            prompt_text = self._try_local(name, compile_vars) or self._try_langfuse(
+                name, version, label, type, fallback, ttl, compile_vars
             )
 
         if not prompt_text:
@@ -92,14 +90,14 @@ class PromptManager:
         return prompt_text
 
     def _try_langfuse(
-            self,
-            name: str,
-            version: Optional[int],
-            label: Optional[str],
-            type: Literal["chat", "text"],
-            fallback: Optional[Union[str, list]],
-            cache_ttl_seconds: int,
-            compile_vars: Optional[Dict[str, Any]] = None,
+        self,
+        name: str,
+        version: Optional[int],
+        label: Optional[str],
+        type: Literal["chat", "text"],
+        fallback: Optional[Union[str, list]],
+        cache_ttl_seconds: int,
+        compile_vars: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
         从 Langfuse 获取 prompt
@@ -127,7 +125,9 @@ class PromptManager:
             logger.error(f"[PromptManager] Langfuse 获取失败: {e}")
         return None
 
-    def _try_local(self, name: str, compile_vars: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    def _try_local(
+        self, name: str, compile_vars: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
         """从本地 configs 获取（并用 compile_vars 格式化字符串）"""
         if not self.config:
             return None

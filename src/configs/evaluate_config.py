@@ -5,6 +5,7 @@
 @File ：evaluate_config.py
 @IDE ：PyCharm
 """
+
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
@@ -27,11 +28,11 @@ class EvaluationConfig(BaseModel):
     gpt_judge_system_prompt: str = "你是问答评估专家"
     gpt_judge_prompt_template: str = (
         "你是一个问答评估专家，请判断模型的回答是否与参考答案在语义上表达的是同一个意思。\n"
-        "请严格根据参考答案来判断，不要自行拓展或联想。如果不一致，请输出\"否\"。\n"
+        '请严格根据参考答案来判断，不要自行拓展或联想。如果不一致，请输出"否"。\n'
         "问题：{question}\n"
         "模型回答：{model_answer}\n"
         "参考答案：{reference}\n"
-        "请你判断模型回答是否和参考答案表达的是同一个意思，只回答\"是\"或\"否\"："
+        '请你判断模型回答是否和参考答案表达的是同一个意思，只回答"是"或"否"：'
     )
 
     # --- RAGAS 评估 ---
@@ -44,7 +45,7 @@ class EvaluationConfig(BaseModel):
             "context_recall",
             "answer_similarity",
         ],
-        description="RAGAS 评估的指标列表"
+        description="RAGAS 评估的指标列表",
     )
     ragas_save_path: Optional[str] = None  # RAGAS 评估结果存储路径
     ragas_file_format: str = "csv"  # 评估结果导出格式: csv、json 等

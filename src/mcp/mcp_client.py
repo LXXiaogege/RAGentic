@@ -11,7 +11,6 @@ import json
 import shutil
 import os
 
-# 设置日志记录器
 logger = setup_logger(__name__)
 
 
@@ -20,17 +19,31 @@ class MCPClient:
         self.session: Optional[ClientSession] = None
         self.stdio = None
         self.write = None
-        self.exit_stack = AsyncExitStack()
-        self.available_tools = []  # 存储实际可用的工具
+        self.exit_stack: Optional[AsyncExitStack] = None
+        self.available_tools = []
 
         self.llm = llm
+        self._connected = False
 
-    async def connect_to_server(self, server_script_path: str):
+    async def __aenter__(self) -> "MCPClient":
+        """Async context manager entry"""
+        self.exit_stack = AsyncExitStack()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Async context manager exit"""
+        await self.cleanup()
+
+    async def connect_to_server(self, server_script_path: str) -> None:
         """Connect to an MCP server
 
         Args:
             server_script_path: Path to the server script (.py or .js)
         """
+        if self._connected:
+            logger.info("MCP client already connected")
+            return
+
         logger.info(f"Attempting to connect to server at: {server_script_path}")
         is_python = server_script_path.endswith(".py")
         is_js = server_script_path.endswith(".js")
@@ -38,10 +51,8 @@ class MCPClient:
             logger.error("Invalid server script file type")
             raise ValueError("Server script must be a .py or .js file")
 
-        # 根据文件类型选择合适的命令
         command = None
         if is_python:
-            # 对于Python文件，使用uv
             command = shutil.which("uv")
             if not command:
                 logger.error("uv command not found in PATH")
@@ -52,7 +63,6 @@ class MCPClient:
             logger.debug(f"Using Python runner: {command} {' '.join(args)}")
 
         elif is_js:
-            # 对于JavaScript文件，使用node
             command = shutil.which("node")
             if not command:
                 logger.error("node command not found in PATH")
@@ -68,6 +78,7 @@ class MCPClient:
             command=command, args=["run", server_script_path], env=None
         )
 
+        self.exit_stack = AsyncExitStack()
         try:
             stdio_transport = await self.exit_stack.enter_async_context(
                 stdio_client(server_params)
@@ -78,9 +89,9 @@ class MCPClient:
             )
             await self.session.initialize()
 
-            # List available tools
             response = await self.session.list_tools()
             self.available_tools = response.tools
+            self._connected = True
             logger.info(
                 f"Successfully connected to server with tools: {[tool.name for tool in self.available_tools]}"
             )
@@ -88,7 +99,7 @@ class MCPClient:
             logger.error(f"Failed to connect to server: {str(e)}")
             raise
 
-    def _convert_mcp_tools_to_openai_format(self):
+    def _convert_mcp_tools_to_openai_format(self) -> list:
         """Convert MCP tools to OpenAI tool format"""
         openai_tools = []
         for tool in self.available_tools:
@@ -106,7 +117,7 @@ class MCPClient:
         return openai_tools
 
     async def execute_tool_calls(self, tool_calls: list) -> list:
-        """执行一组 tool_calls（LangChain ToolCall 格式），返回结果字符串列表"""
+        """Execute a list of tool calls (LangChain ToolCall format), return result strings"""
 
         async def call_single_tool(tool_call):
             tool_name = tool_call["name"]
@@ -132,7 +143,7 @@ class MCPClient:
                 )
                 return f"[Unexpected error calling tool {tool_name}: {type(e).__name__}: {e}]"
 
-        return list(await asyncio.gather(*[call_single_tool(tc) for tc in tool_calls]))
+        return await asyncio.gather(*[call_single_tool(tc) for tc in tool_calls])
 
     async def process_query(self, query: str) -> str:
         """Process a query using openai and available tools"""
@@ -164,40 +175,21 @@ class MCPClient:
             logger.info("No tool calls required")
             return ""
 
-        # 并发调用所有工具
-        async def call_single_tool(tool_call):
-            if tool_call.type == "function":
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
-                logger.info(f"Calling tool: {tool_name} with args: {tool_args}")
-                try:
-                    tool_result = await self.session.call_tool(tool_name, tool_args)
-                    if not tool_result.isError:
-                        logger.info(f"Tool {tool_name} executed successfully")
-                        if tool_result.content and len(tool_result.content) > 0:
-                            content = tool_result.content[0]
-                            if hasattr(content, "text"):
-                                return f"[Tool {tool_name} result]: {content.text}"
-                            else:
-                                return f"[Tool {tool_name} result]: {str(content)}"
-                        return (
-                            f"[Tool {tool_name} result]: {tool_result.content[0].text}"
-                        )
-                    else:
-                        logger.error(f"Tool {tool_name} returned an error")
-                        return f"[Error calling tool {tool_name}]"
-                except Exception as e:
-                    logger.error(f"Error executing tool {tool_name}: {str(e)}")
-                    return f"[Exception calling tool {tool_name}]"
-            else:
-                return "[Unsupported tool call type]"
-
-        tasks = [call_single_tool(tc) for tc in message.tool_calls]
-        results = await asyncio.gather(*tasks)
+        results = await self.execute_tool_calls(
+            [
+                {
+                    "name": tc.function.name,
+                    "args": json.loads(tc.function.arguments),
+                    "id": tc.id,
+                    "type": "function",
+                }
+                for tc in message.tool_calls
+            ]
+        )
         final_text = "\n".join(results)
         return final_text
 
-    async def chat_loop(self, query):
+    async def chat_loop(self, query: str) -> str:
         """Run an interactive chat loop"""
         logger.info("Starting chat loop")
 
@@ -209,21 +201,29 @@ class MCPClient:
             logger.error(f"Error in chat loop: {str(e)}")
             raise
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Clean up resources"""
         logger.info("Cleaning up resources")
         try:
-            await self.exit_stack.aclose()
+            if self.exit_stack:
+                await self.exit_stack.aclose()
+            self._connected = False
+            self.session = None
+            self.stdio = None
+            self.write = None
             logger.info("Cleanup completed")
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
 
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
 
-def _find_project_root():
+
+def _find_project_root() -> str:
     """查找项目根目录"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 向上查找，直到找到包含常见项目文件的目录
     project_markers = [
         "pyproject.toml",
         "setup.py",
@@ -232,28 +232,26 @@ def _find_project_root():
         "mcp_server.py",
     ]
 
-    while current_dir != os.path.dirname(current_dir):  # 避免到达根目录
+    while current_dir != os.path.dirname(current_dir):
         for marker in project_markers:
             if os.path.exists(os.path.join(current_dir, marker)):
                 return current_dir
         current_dir = os.path.dirname(current_dir)
 
-    # 如果没找到项目标记，返回当前工作目录
     return os.getcwd()
 
 
-async def mcp_main(client, query):
+async def mcp_main(client: MCPClient, query: str) -> str:
     logger.info(f"Starting MCP main with query: {query}")
     project_root = _find_project_root()
     server_script_path = os.path.join(project_root, "mcp_server.py")
-    # 如果项目根目录没有，尝试当前工作目录
     if not os.path.exists(server_script_path):
         server_script_path = os.path.join(os.getcwd(), "mcp_server.py")
 
-    # 如果还是没有，尝试相对于当前文件的路径
     if not os.path.exists(server_script_path):
         current_dir = os.path.dirname(os.path.abspath(__file__))
         server_script_path = os.path.join(os.path.dirname(current_dir), "mcp_server.py")
+
     try:
         await client.connect_to_server(server_script_path)
         logger.info("Server connected, sending query")

@@ -1,15 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 RAGentic - Chainlit UI
-Replaces web_app.py (Gradio) with a Chainlit 2.10 interface.
-Preserves all features: streaming, security validation, runtime config injection,
-session management, knowledge base / tool / memory toggles.
+纯 Async 架构版本
 """
 
 import asyncio
 import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from src.configs.config import AppConfig
 from typing import Optional
 
@@ -24,13 +21,6 @@ from src.utils.security import SecurityManager
 
 logger = setup_logger(__name__)
 
-# ===== Module-level singletons (initialized once at startup) =====
-_app_config: Optional[AppConfig] = None
-_pipeline: Optional[LangGraphQAPipeline] = None
-_executor = ThreadPoolExecutor(max_workers=4)
-_pipeline_lock = asyncio.Lock()
-
-# ===== Node display names (Chinese) =====
 _NODE_NAMES = {
     "retrieve_knowledge": "检索知识库",
     "call_tools": "调用工具",
@@ -41,31 +31,21 @@ _NODE_NAMES = {
     "update_memory": "更新记忆",
 }
 
-# Nodes that should be shown as Steps in the UI
 _SHOW_NODES = {"retrieve_knowledge", "call_tools", "transform_query"}
-
-# Streaming output chunk size (characters per chunk)
 _STREAM_CHUNK_SIZE = 6
-# Context preview max length for display
 _CONTEXT_PREVIEW_MAX_LEN = 500
-
-
-# ===== App Startup =====
 
 
 @cl.on_app_startup
 async def on_startup():
-    global _app_config, _pipeline
-
-    _app_config = AppConfig()
-
-    # Mirror web_app.py environment setup
-    os.environ["LANGFUSE_SECRET_KEY"] = _app_config.langfuse.secret_key
-    os.environ["LANGFUSE_PUBLIC_KEY"] = _app_config.langfuse.public_key
-    os.environ["LANGFUSE_HOST"] = _app_config.langfuse.host
+    os.environ["LANGFUSE_SECRET_KEY"] = os.getenv("LANGFUSE_SECRET_KEY", "")
+    os.environ["LANGFUSE_PUBLIC_KEY"] = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    os.environ["LANGFUSE_HOST"] = os.getenv(
+        "LANGFUSE_HOST", "https://cloud.langfuse.com"
+    )
     os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = "production"
-    os.environ["OPENAI_API_KEY"] = _app_config.llm.api_key
-    os.environ["OPENAI_API_BASE"] = _app_config.llm.base_url
+    os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
+    os.environ["OPENAI_API_BASE"] = os.getenv("OPENAI_API_BASE", "")
 
     try:
         Langfuse()
@@ -73,28 +53,10 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Langfuse 客户端初始化失败：{e}")
 
-    _pipeline = LangGraphQAPipeline(_app_config)
-    logger.info("RAGentic pipeline 初始化完成")
-
 
 @cl.on_app_shutdown
 async def on_shutdown():
-    """清理应用资源"""
-    global _executor, _pipeline
-    logger.info("开始清理应用资源...")
-
-    if _executor:
-        _executor.shutdown(wait=False)
-        logger.info("ThreadPoolExecutor 已关闭")
-
-    if _pipeline:
-        _pipeline._close_mcp_client()
-        logger.info("Pipeline MCP 客户端已关闭")
-
-    logger.info("应用资源清理完成")
-
-
-# ===== Chat Session Start =====
+    logger.info("应用关闭")
 
 
 @cl.on_chat_start
@@ -114,7 +76,6 @@ async def on_chat_start():
     }
     cl.user_session.set("settings", default_settings)
 
-    # Build ChatSettings panel (rendered in sidebar via config.toml)
     settings = cl.ChatSettings(
         [
             Switch(
@@ -152,7 +113,7 @@ async def on_chat_start():
             ),
             Switch(
                 id="use_sparse",
-                label="🔀 混合检索",
+                label="混合检索",
                 initial=False,
                 description="稠密 + 稀疏 (BM25) 混合检索",
             ),
@@ -172,7 +133,6 @@ async def on_chat_start():
     )
     await settings.send()
 
-    # Welcome message with action buttons
     actions = _make_actions()
     welcome = cl.Message(
         content=(
@@ -186,16 +146,10 @@ async def on_chat_start():
     await welcome.send()
 
 
-# ===== Settings Update =====
-
-
 @cl.on_settings_update
 async def on_settings_update(settings: dict):
     cl.user_session.set("settings", settings)
     logger.debug(f"设置已更新: {settings}")
-
-
-# ===== Action Callbacks =====
 
 
 def _make_actions():
@@ -230,8 +184,6 @@ async def on_new_chat(action: cl.Action):
 
 @cl.action_callback("clear_memory")
 async def on_clear_memory(action: cl.Action):
-    # LangGraph MemorySaver isolates history by thread_id.
-    # Generating a new session_id is equivalent to clearing memory.
     new_session_id = str(uuid.uuid4())
     cl.user_session.set("session_id", new_session_id)
 
@@ -243,14 +195,10 @@ async def on_clear_memory(action: cl.Action):
     ).send()
 
 
-# ===== Main Message Handler =====
-
-
 @cl.on_message
 async def on_message(message: cl.Message):
     query = message.content.strip()
 
-    # Security validation (mirrors web_app.py)
     is_valid, error_msg = SecurityManager.validate_query(query)
     if not is_valid:
         logger.warning(f"无效查询：{error_msg}")
@@ -259,7 +207,6 @@ async def on_message(message: cl.Message):
 
     query = SecurityManager.sanitize_input(query)
 
-    # Load per-session state
     session_id = cl.user_session.get("session_id") or str(uuid.uuid4())
     settings = cl.user_session.get("settings") or {}
 
@@ -272,8 +219,40 @@ async def on_message(message: cl.Message):
     use_reranker = bool(settings.get("use_reranker", False))
     enable_think = bool(settings.get("enable_think", False))
 
-    # Build per-request config (avoids deepcopy of expensive objects)
-    req_config = _app_config.create_request_config(
+    if use_stream:
+        await _handle_stream(
+            query,
+            session_id,
+            use_kb,
+            use_tool,
+            use_memory,
+            top_k,
+            use_sparse,
+            use_reranker,
+            enable_think,
+        )
+    else:
+        await _handle_sync(
+            query,
+            session_id,
+            use_kb,
+            use_tool,
+            use_memory,
+            top_k,
+            use_sparse,
+            use_reranker,
+            enable_think,
+        )
+
+
+async def _get_pipeline_and_config(
+    use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think
+):
+    """获取 pipeline 实例和请求配置"""
+
+    config = AppConfig()
+
+    req_config = config.create_request_config(
         use_kb=use_kb,
         use_tool=use_tool,
         use_memory=use_memory,
@@ -283,130 +262,119 @@ async def on_message(message: cl.Message):
         extra_body={"chat_template_kwargs": {"enable_thinking": enable_think}},
     )
 
-    # Inject config (lock ensures no concurrent mutation)
-    async with _pipeline_lock:
-        _pipeline.config = req_config
-        if use_stream:
-            await _handle_stream(query, session_id)
-        else:
-            await _handle_sync(query, session_id)
+    pipeline = LangGraphQAPipeline(req_config)
+    return pipeline
 
 
-# ===== Streaming Handler =====
-
-
-async def _handle_stream(query: str, session_id: str):
-    """
-    Bridge between the synchronous ask_stream() generator and Chainlit's async loop.
-
-    ask_stream() yields:
-      {"node": str, "status": "processing", "state": {...}}  — per node
-      {"node": "generate_answer", "status": "complete", "answer": str, "context": str}
-      {"status": "error", "error": str}
-    """
-    loop = asyncio.get_event_loop()
-    queue: asyncio.Queue = asyncio.Queue()
-
-    def _run_generator():
-        try:
-            for event in _pipeline.ask_stream(
-                query=query,
-                thread_id=session_id,
-                langfuse_session_id=session_id,
-            ):
-                asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
-        except Exception as e:
-            logger.exception("流式问答生成器异常")
-            asyncio.run_coroutine_threadsafe(
-                queue.put({"status": "error", "error": str(e)}), loop
-            ).result()
-        finally:
-            asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
-
-    loop.run_in_executor(_executor, _run_generator)
+async def _handle_stream(
+    query: str,
+    session_id: str,
+    use_kb: bool,
+    use_tool: bool,
+    use_memory: bool,
+    top_k: int,
+    use_sparse: bool,
+    use_reranker: bool,
+    enable_think: bool,
+):
+    """流式处理 - 纯 async"""
+    pipeline = await _get_pipeline_and_config(
+        use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think
+    )
 
     answer_msg = cl.Message(content="", author="RAGentic")
     answer_started = False
     active_step: Optional[cl.Step] = None
 
-    while True:
-        event = await queue.get()
-        if event is None:
-            break
+    try:
+        async for event in pipeline.ask_stream(
+            query=query,
+            thread_id=session_id,
+            langfuse_session_id=session_id,
+        ):
+            status = event.get("status")
+            node = event.get("node", "")
 
-        status = event.get("status")
-        node = event.get("node", "")
+            if status == "error":
+                err_text = event.get("error", "未知错误")
+                if answer_started:
+                    await answer_msg.stream_token(f"\n\n❌ 错误：{err_text}")
+                    await answer_msg.send()
+                else:
+                    await cl.Message(
+                        content=f"❌ 错误：{err_text}", author="System"
+                    ).send()
+                return
 
-        if status == "error":
-            err_text = event.get("error", "未知错误")
-            if answer_started:
-                await answer_msg.stream_token(f"\n\n❌ 错误：{err_text}")
-                await answer_msg.send()
-            else:
-                await cl.Message(content=f"❌ 错误：{err_text}", author="System").send()
-            return
-
-        elif status == "processing" and node in _SHOW_NODES:
-            display_name = _NODE_NAMES.get(node, node)
-            step_type = "retrieval" if node == "retrieve_knowledge" else "tool"
-            active_step = cl.Step(
-                name=display_name,
-                type=step_type,
-            )
-            await active_step.__aenter__()
-            state_info = event.get("state", {})
-            active_step.output = _format_step_output(node, state_info)
-            await active_step.__aexit__(None, None, None)
-
-        elif status == "complete" and node == "generate_answer":
-            answer = event.get("answer", "")
-            context = event.get("context", "") or ""
-
-            if not answer_started:
-                await answer_msg.send()
-                answer_started = True
-
-            # Simulate streaming by sending in small chunks
-            for i in range(0, len(answer), _STREAM_CHUNK_SIZE):
-                await answer_msg.stream_token(answer[i : i + _STREAM_CHUNK_SIZE])
-                await asyncio.sleep(0)  # yield control to event loop
-
-            # Attach context as a side element if available
-            if context:
-                ctx_preview = (
-                    context[:_CONTEXT_PREVIEW_MAX_LEN] + "\n\n...(截断)"
-                    if len(context) > _CONTEXT_PREVIEW_MAX_LEN
-                    else context
+            elif status == "processing" and node in _SHOW_NODES:
+                display_name = _NODE_NAMES.get(node, node)
+                step_type = "retrieval" if node == "retrieve_knowledge" else "tool"
+                active_step = cl.Step(
+                    name=display_name,
+                    type=step_type,
                 )
-                answer_msg.elements = [
-                    cl.Text(
-                        name="📚 检索参考源",
-                        content=ctx_preview,
-                        display="side",
-                    )
-                ]
+                await active_step.__aenter__()
+                state_info = event.get("state", {})
+                active_step.output = _format_step_output(node, state_info)
+                await active_step.__aexit__(None, None, None)
 
-            await answer_msg.send()
+            elif status == "complete" and node == "generate_answer":
+                answer = event.get("answer", "")
+                context = event.get("context", "") or ""
+
+                if not answer_started:
+                    await answer_msg.send()
+                    answer_started = True
+
+                for i in range(0, len(answer), _STREAM_CHUNK_SIZE):
+                    await answer_msg.stream_token(answer[i : i + _STREAM_CHUNK_SIZE])
+                    await asyncio.sleep(0)
+
+                if context:
+                    ctx_preview = (
+                        context[:_CONTEXT_PREVIEW_MAX_LEN] + "\n\n...(截断)"
+                        if len(context) > _CONTEXT_PREVIEW_MAX_LEN
+                        else context
+                    )
+                    answer_msg.elements = [
+                        cl.Text(
+                            name="📚 检索参考源",
+                            content=ctx_preview,
+                            display="side",
+                        )
+                    ]
+
+                await answer_msg.send()
+
+    except Exception as e:
+        logger.exception("流式问答处理异常")
+        await cl.Message(content=f"❌ 错误：{str(e)}", author="System").send()
 
     if not answer_started:
         await cl.Message(content="抱歉，未能生成答案。", author="RAGentic").send()
 
 
-# ===== Sync (Non-streaming) Handler =====
-
-
-async def _handle_sync(query: str, session_id: str):
-    """Non-streaming fallback: run pipeline.ask() in a thread pool."""
-    loop = asyncio.get_event_loop()
+async def _handle_sync(
+    query: str,
+    session_id: str,
+    use_kb: bool,
+    use_tool: bool,
+    use_memory: bool,
+    top_k: int,
+    use_sparse: bool,
+    use_reranker: bool,
+    enable_think: bool,
+):
+    """同步处理 - 纯 async"""
+    pipeline = await _get_pipeline_and_config(
+        use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think
+    )
 
     try:
-        result = await loop.run_in_executor(
-            _executor,
-            lambda: _pipeline.ask(
-                query=query,
-                thread_id=session_id,
-                langfuse_session_id=session_id,
-            ),
+        result = await pipeline.ask(
+            query=query,
+            thread_id=session_id,
+            langfuse_session_id=session_id,
         )
     except Exception as e:
         logger.exception("同步问答处理异常")
@@ -438,9 +406,6 @@ async def _handle_sync(query: str, session_id: str):
     await cl.Message(content=answer, author="RAGentic", elements=elements).send()
 
 
-# ===== Starter Examples =====
-
-
 @cl.set_starters
 async def set_starters():
     return [
@@ -457,9 +422,6 @@ async def set_starters():
             message="请介绍一下 RAG 技术的原理和应用场景",
         ),
     ]
-
-
-# ===== Helper Functions =====
 
 
 def _format_step_output(node: str, state: dict) -> str:

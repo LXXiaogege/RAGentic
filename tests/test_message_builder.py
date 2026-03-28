@@ -2,7 +2,6 @@
 """MessageBuilder 单元测试"""
 
 import pytest
-from unittest.mock import Mock, patch
 
 from src.configs.retrieve_config import MessageBuilderConfig
 from src.cores.message_builder import MessageBuilder

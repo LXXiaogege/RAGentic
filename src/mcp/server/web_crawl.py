@@ -5,6 +5,7 @@
 @File ：function_call_service.py
 @IDE ：PyCharm
 """
+
 # from mcp.server.fastmcp import FastMCP
 from src.agent.tools import WebSpider
 from src.configs.logger_config import setup_logger
@@ -41,7 +42,7 @@ async def web_crawl(url: str) -> str:
 def main():
     """启动 MCP 服务"""
     logger.info("启动函数调用 MCP 服务")
-    mcp.run(transport='stdio')
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

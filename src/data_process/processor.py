@@ -5,6 +5,7 @@
 @File ：data_processor.py
 @IDE ：PyCharm
 """
+
 from typing import List
 from langchain_core.documents import Document
 from src.data_process.processors.text_processor import TextProcessor
@@ -49,7 +50,9 @@ class DataProcessor:
 
             # 处理每个文档
             self.logger.debug("处理文档内容...")
-            processed_docs = [self.text_processor.process_document(doc) for doc in documents]
+            processed_docs = [
+                self.text_processor.process_document(doc) for doc in documents
+            ]
             self.logger.info(f"文档处理完成，处理后的文档数: {len(processed_docs)}")
 
             # 分割文档
@@ -83,12 +86,16 @@ class DataProcessor:
                 processed_docs = self.process_file(file_path)
                 all_documents.extend(processed_docs)
                 success_count += 1
-                self.logger.info(f"文件 {file_path} 处理成功，生成 {len(processed_docs)} 个文档片段")
+                self.logger.info(
+                    f"文件 {file_path} 处理成功，生成 {len(processed_docs)} 个文档片段"
+                )
             except Exception as e:
                 error_count += 1
                 self.logger.exception(f"处理文件 {file_path} 时出错: {str(e)}")
                 continue
 
-        self.logger.info(f"批量处理完成，成功: {success_count} 个文件，失败: {error_count} 个文件")
+        self.logger.info(
+            f"批量处理完成，成功: {success_count} 个文件，失败: {error_count} 个文件"
+        )
         self.logger.info(f"总共生成 {len(all_documents)} 个文档片段")
         return all_documents

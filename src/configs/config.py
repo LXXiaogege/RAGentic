@@ -251,6 +251,7 @@ class AppConfig(BaseSettings):
         )
 
         new_config = AppConfig.__new__(AppConfig)
+        new_config.__pydantic_fields_set__ = set()
         new_config.debug = self.debug
         new_config.llm = self.llm
         new_config.embedding = self.embedding

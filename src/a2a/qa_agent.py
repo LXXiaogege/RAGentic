@@ -31,6 +31,7 @@ logger = setup_logger(__name__)
 
 class QAState(TypedDict):
     """QA Pipeline的状态定义"""
+
     # 核心数据
     messages: Annotated[List, add_messages]  # 对话消息
     original_query: str  # 原始查询
@@ -61,9 +62,7 @@ class QAState(TypedDict):
 
 
 def build_prompt_messages(
-        state: QAState,
-        system_prompt: str,
-        memory_limit: int = 10
+    state: QAState, system_prompt: str, memory_limit: int = 10
 ) -> List:
     """构建用于 LLM 调用的消息序列"""
 
@@ -74,8 +73,7 @@ def build_prompt_messages(
     # 添加历史消息（如有）
     if state.get("use_memory") and state.get("messages"):
         history_messages = [
-            msg for msg in state["messages"]
-            if not isinstance(msg, SystemMessage)
+            msg for msg in state["messages"] if not isinstance(msg, SystemMessage)
         ]
         messages.extend(history_messages[-memory_limit:])
 
@@ -83,13 +81,15 @@ def build_prompt_messages(
     query_content = state["original_query"]
 
     if (
-            state.get("transformed_query")
-            and state["transformed_query"] != state["original_query"]
+        state.get("transformed_query")
+        and state["transformed_query"] != state["original_query"]
     ):
         query_content = f"原始问题：{state['original_query']}\n转换后的问题：{state['transformed_query']}"
 
     if state.get("final_context"):
-        query_content = f"上下文信息：\n{state['final_context']}\n\n问题：{query_content}"
+        query_content = (
+            f"上下文信息：\n{state['final_context']}\n\n问题：{query_content}"
+        )
 
     messages.append(HumanMessage(content=query_content))
 
@@ -112,20 +112,25 @@ class QA_Agent:
         self.embeddings = TextEmbedding(self.config.embedding)
 
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.config.chunk_size,
-            chunk_overlap=self.config.chunk_overlap
+            chunk_size=self.config.chunk_size, chunk_overlap=self.config.chunk_overlap
         )
         self.message_builder = MessageBuilder(self.config.message_builder)
 
         # 向量数据库
-        self.db_connection_manager = MilvusConnectionManager(self.embeddings, self.text_splitter, self.config.milvus)
+        self.db_connection_manager = MilvusConnectionManager(
+            self.embeddings, self.text_splitter, self.config.milvus
+        )
 
         # LLM包装器
         self.llm_caller = LLMWrapper(self.config.llm)
 
         # 查询转换器
-        self.query_transformer = QueryTransformer(self.llm_caller, self.message_builder, self.embeddings,
-                                                  self.db_connection_manager)
+        self.query_transformer = QueryTransformer(
+            self.llm_caller,
+            self.message_builder,
+            self.embeddings,
+            self.db_connection_manager,
+        )
 
         # MCP客户端
         self.mcp_client = MCPClient(self.llm_caller)
@@ -141,7 +146,9 @@ class QA_Agent:
         # 添加节点
         workflow.add_node("parse_query", self._parse_query)  # 解析查询及配置参数
         workflow.add_node("transform_query", self._transform_query)  # 转换查询
-        workflow.add_node("check_retrieve_knowledge", self._check_retrieve_knowledge)  # 检查是否需要检索知识库
+        workflow.add_node(
+            "check_retrieve_knowledge", self._check_retrieve_knowledge
+        )  # 检查是否需要检索知识库
         workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("check_call_tools", self._check_call_tools)
         workflow.add_node("call_tools", self._call_tools)
@@ -168,8 +175,8 @@ class QA_Agent:
             {
                 "transform": "transform_query",
                 "skip_transform": "check_retrieve_knowledge",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
         # 当执行transform_query时
         workflow.add_conditional_edges(
@@ -178,8 +185,8 @@ class QA_Agent:
             {
                 "do_retrieve": "retrieve_knowledge",
                 "skip_retrieve": "check_call_tools",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
 
         workflow.add_conditional_edges(
@@ -188,8 +195,8 @@ class QA_Agent:
             {
                 "call_tools": "call_tools",
                 "skip_tools": "build_context",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
 
         # 是否需要知识库检索
@@ -199,8 +206,8 @@ class QA_Agent:
             {
                 "do_retrieve": "retrieve_knowledge",
                 "skip_retrieve": "check_call_tools",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
 
         # 知识检索后的条件分支
@@ -210,8 +217,8 @@ class QA_Agent:
             {
                 "call_tools": "call_tools",
                 "skip_tools": "build_context",
-                "error": "handle_error"
-            }
+                "error": "handle_error",
+            },
         )
 
         # 工具调用后构建上下文
@@ -224,11 +231,7 @@ class QA_Agent:
         workflow.add_conditional_edges(
             "generate_answer",
             self._should_update_memory,
-            {
-                "update_memory": "update_memory",
-                "finish": END,
-                "error": "handle_error"
-            }
+            {"update_memory": "update_memory", "finish": END, "error": "handle_error"},
         )
 
         # 更新记忆后结束
@@ -245,15 +248,19 @@ class QA_Agent:
             logger.info(f"解析查询: {state['original_query']}")
 
             # 设置默认参数
-            state.update({
-                "k": state.get("k", self.config.default_top_k),
-                "use_sparse": state.get("use_sparse", self.config.use_sparse),
-                "use_reranker": state.get("use_reranker", self.config.use_reranker),
-                "use_knowledge_base": state.get("use_knowledge_base", self.config.use_knowledge_base),
-                "use_tools": state.get("use_tools", self.config.use_tools),
-                "use_memory": state.get("use_memory", self.config.use_memory),
-                "error": None
-            })
+            state.update(
+                {
+                    "k": state.get("k", self.config.default_top_k),
+                    "use_sparse": state.get("use_sparse", self.config.use_sparse),
+                    "use_reranker": state.get("use_reranker", self.config.use_reranker),
+                    "use_knowledge_base": state.get(
+                        "use_knowledge_base", self.config.use_knowledge_base
+                    ),
+                    "use_tools": state.get("use_tools", self.config.use_tools),
+                    "use_memory": state.get("use_memory", self.config.use_memory),
+                    "error": None,
+                }
+            )
 
             return state
 
@@ -267,7 +274,7 @@ class QA_Agent:
         try:
             original_query = state["original_query"]
             logger.info(f"转换查询: {original_query}")
-            if state['rewrite_config']:
+            if state["rewrite_config"]:
                 mode = self.config.rewrite_config["mode"]
                 transformed_query = self.query_transformer.transform_query(
                     original_query, mode
@@ -275,7 +282,7 @@ class QA_Agent:
                 state["transformed_query"] = transformed_query
                 logger.info(f"查询转换完成: {transformed_query}")
             else:
-                state["transformed_query"] = ''
+                state["transformed_query"] = ""
 
             return state
 
@@ -297,18 +304,21 @@ class QA_Agent:
                 state["kb_context"] = ""
                 return state
 
-            query = state.get("transformed_query", '') or state["original_query"]
+            query = state.get("transformed_query", "") or state["original_query"]
             logger.info(f"开始知识库检索: {query}")
 
             # 选择检索方法
-            if (state.get("rewrite_config") and self.config.rewrite_config["mode"] == "hyde"):
+            if (
+                state.get("rewrite_config")
+                and self.config.rewrite_config["mode"] == "hyde"
+            ):
                 results = self.query_transformer.hyde_search(query, state["k"])
             else:
                 results = self.db_manager.search(
                     query=query,
                     k=state["k"],
                     use_sparse=state["use_sparse"],
-                    use_reranker=state["use_reranker"]
+                    use_reranker=state["use_reranker"],
                 )
 
             # 处理检索结果
@@ -316,14 +326,16 @@ class QA_Agent:
                 state["kb_context"] = "未检索到相关知识。"
                 logger.warning("知识库检索未返回结果")
             else:
-                valid_results = [doc for doc in results if doc and doc.get('text')]
+                valid_results = [doc for doc in results if doc and doc.get("text")]
                 if not valid_results:
                     state["kb_context"] = "未检索到有效知识。"
                 else:
-                    kb_context = "\n".join([
-                        f"【文档{i + 1}】{doc['text']}"
-                        for i, doc in enumerate(valid_results)
-                    ])
+                    kb_context = "\n".join(
+                        [
+                            f"【文档{i + 1}】{doc['text']}"
+                            for i, doc in enumerate(valid_results)
+                        ]
+                    )
                     state["kb_context"] = f"【知识库检索内容】\n{kb_context}"
                 logger.info(f"知识库检索返回 {len(results)} 条结果")
 
@@ -400,16 +412,16 @@ class QA_Agent:
                 else self.config.system_prompt
             )
             messages = build_prompt_messages(
-                state,
-                system_prompt=system_prompt,
-                memory_limit=10
+                state, system_prompt=system_prompt, memory_limit=10
             )
-            answer = self.llm_caller.chat(messages=messages,
-                                          extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+            answer = self.llm_caller.chat(
+                messages=messages,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
 
             state["messages"] = state.get("messages", []) + [
                 HumanMessage(content=state["original_query"]),
-                AIMessage(content=answer)
+                AIMessage(content=answer),
             ]
 
             logger.info("答案生成完成")
@@ -453,7 +465,7 @@ class QA_Agent:
         if state.get("error"):
             return "error"
 
-        if state.get('rewrite_config'):
+        if state.get("rewrite_config"):
             return "transform"
         else:
             return "skip_transform"
@@ -509,12 +521,14 @@ class QA_Agent:
             "original_query": query,
             "messages": existing_messages,
             "rewrite_config": kwargs.get("rewrite_config", self.config.rewrite_config),
-            "use_knowledge_base": kwargs.get("use_knowledge_base", self.config.use_knowledge_base),
+            "use_knowledge_base": kwargs.get(
+                "use_knowledge_base", self.config.use_knowledge_base
+            ),
             "use_tools": kwargs.get("use_tools", self.config.use_tools),
             "use_memory": kwargs.get("use_memory", self.config.use_memory),
             "k": kwargs.get("k", self.config.default_top_k),
             "use_sparse": kwargs.get("use_sparse", self.config.use_sparse),
-            "use_reranker": kwargs.get("use_reranker", self.config.use_reranker)
+            "use_reranker": kwargs.get("use_reranker", self.config.use_reranker),
         }
 
         return config, initial_state
@@ -535,7 +549,8 @@ class QA_Agent:
 
             # 提取最后的AI消息作为答案
             ai_messages = [
-                msg.content for msg in result.get("messages", [])
+                msg.content
+                for msg in result.get("messages", [])
                 if isinstance(msg, AIMessage)
             ]
 
@@ -549,7 +564,7 @@ class QA_Agent:
                 "transformed_query": result.get("transformed_query", ""),
                 "context": result.get("final_context", ""),
                 "kb_context": result.get("kb_context", ""),
-                "tool_context": result.get("tool_context", "")
+                "tool_context": result.get("tool_context", ""),
             }
 
         except Exception as e:
@@ -568,40 +583,52 @@ class QA_Agent:
             kb_flag = False
             tool_flag = False
             messages_flag = False
-            for event in self.graph.stream(initial_state, config, stream_mode='values'):
-                if event.get('transformed_query') and event.get('rewrite_config') and not rewrite_flag:  # 完成查询重写
+            for event in self.graph.stream(initial_state, config, stream_mode="values"):
+                if (
+                    event.get("transformed_query")
+                    and event.get("rewrite_config")
+                    and not rewrite_flag
+                ):  # 完成查询重写
                     rewrite_flag = True
                     yield {
                         "is_task_complete": False,
                         "require_user_input": False,
-                        "content": event.get('transformed_query'),
-                        "status": "transformed_query"
+                        "content": event.get("transformed_query"),
+                        "status": "transformed_query",
                     }
-                if event.get('kb_context') and event.get('use_knowledge_base') and not kb_flag:  # 获取知识库内容
+                if (
+                    event.get("kb_context")
+                    and event.get("use_knowledge_base")
+                    and not kb_flag
+                ):  # 获取知识库内容
                     kb_flag = True
                     yield {
                         "is_task_complete": False,
                         "require_user_input": False,
-                        "content": event.get('kb_context'),
-                        "status": "kb_context"
+                        "content": event.get("kb_context"),
+                        "status": "kb_context",
                     }
-                if event.get('tool_context') and event.get('use_tools') and not tool_flag:  # 获取工具内容
+                if (
+                    event.get("tool_context")
+                    and event.get("use_tools")
+                    and not tool_flag
+                ):  # 获取工具内容
                     tool_flag = True
                     yield {
                         "is_task_complete": False,
                         "require_user_input": False,
-                        "content": event.get('tool_context'),
-                        "status": "tool_context"
+                        "content": event.get("tool_context"),
+                        "status": "tool_context",
                     }
-                if event.get('messages') and not messages_flag:  # 生成最后答案
+                if event.get("messages") and not messages_flag:  # 生成最后答案
                     messages_flag = True
-                    last_msg = event['messages'][-1]
+                    last_msg = event["messages"][-1]
                     if isinstance(last_msg, AIMessage):
                         yield {
                             "is_task_complete": False,
                             "require_user_input": False,
                             "content": last_msg.content,  # 取纯字符串
-                            "status": "generated_answer"
+                            "status": "generated_answer",
                         }
 
             yield self._get_final_response(config, query, existing_messages)
@@ -612,7 +639,7 @@ class QA_Agent:
                 "is_task_complete": False,
                 "require_user_input": True,
                 "content": f"处理请求时出错: {str(e)}",
-                "status": "error"
+                "status": "error",
             }
 
     def _get_final_response(self, config, query, existing_messages):
@@ -623,7 +650,7 @@ class QA_Agent:
                     "is_task_complete": False,
                     "require_user_input": True,
                     "content": "无法获取处理结果，请重试。",
-                    "status": "error"
+                    "status": "error",
                 }
 
             state_values = current_state.values
@@ -632,17 +659,19 @@ class QA_Agent:
                     "is_task_complete": False,
                     "require_user_input": True,
                     "content": f"处理过程中出现错误: {state_values['error']}",
-                    "status": "error"
+                    "status": "error",
                 }
 
             messages = state_values.get("messages", existing_messages)
-            ai_messages = [msg.content for msg in messages if isinstance(msg, AIMessage)]
+            ai_messages = [
+                msg.content for msg in messages if isinstance(msg, AIMessage)
+            ]
             if not ai_messages:
                 return {
                     "is_task_complete": False,
                     "require_user_input": True,
                     "content": "无法生成答案，请重试。",
-                    "status": "error"
+                    "status": "error",
                 }
 
             answer = ai_messages[-1]
@@ -658,8 +687,8 @@ class QA_Agent:
                     "transformed_query": state_values.get("transformed_query", ""),
                     "context": state_values.get("final_context", ""),
                     "kb_context": state_values.get("kb_context", ""),
-                    "tool_context": state_values.get("tool_context", "")
-                }
+                    "tool_context": state_values.get("tool_context", ""),
+                },
             }
 
         except Exception as e:
@@ -668,7 +697,7 @@ class QA_Agent:
                 "is_task_complete": False,
                 "require_user_input": True,
                 "content": f"获取最终结果时出错: {str(e)}",
-                "status": "error"
+                "status": "error",
             }
 
     def export_graph(self, output_path: str = "qa_pipeline_graph.png"):
@@ -678,7 +707,7 @@ class QA_Agent:
             mermaid_code = self.graph.get_graph().draw_mermaid()
 
             # 保存到文件
-            with open(output_path.replace('.png', '.mmd'), 'w', encoding='utf-8') as f:
+            with open(output_path.replace(".png", ".mmd"), "w", encoding="utf-8") as f:
                 f.write(mermaid_code)
 
             logger.info(f"图结构已导出到: {output_path}")

@@ -6,8 +6,10 @@
 @IDE：PyCharm
 
 混合记忆服务 - 统一管理短期记忆(LangGraph Checkpoint)和长期记忆(Mem0)
+纯 Async 架构版本
 """
 
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from src.configs.config import AppConfig
@@ -48,6 +50,7 @@ class HybridMemoryService(MemoryService):
         self._stm: Optional[ShortTermMemory] = None
         self._ltm: Optional[LongTermMemory] = None
         self._initialized = False
+        self._init_lock = asyncio.Lock()
 
         self._conversation_count = 0
         self._pending_stm_messages: List[Dict[str, str]] = []
@@ -59,22 +62,26 @@ class HybridMemoryService(MemoryService):
         )
 
     async def initialize(self) -> None:
-        """初始化所有记忆组件"""
+        """初始化所有记忆组件 - 简化版本"""
         if self._initialized:
             return
 
-        if self.enable_stm:
-            self._stm = ShortTermMemory(window_size=self.stm_window_size)
-            self._stm.set_context(user_id=self.user_id, thread_id=self.user_id)
-            logger.info("短期记忆初始化完成")
+        async with self._init_lock:
+            if self._initialized:
+                return
 
-        if self.enable_ltm:
-            self._ltm = LongTermMemory(config=self.config, user_id=self.user_id)
-            await self._ltm.initialize()
-            logger.info("长期记忆初始化完成")
+            if self.enable_stm:
+                self._stm = ShortTermMemory(window_size=self.stm_window_size)
+                self._stm.set_context(user_id=self.user_id, thread_id=self.user_id)
+                logger.info("短期记忆初始化完成")
 
-        self._initialized = True
-        logger.info("混合记忆服务初始化完成")
+            if self.enable_ltm:
+                self._ltm = LongTermMemory(config=self.config, user_id=self.user_id)
+                await self._ltm.initialize()
+                logger.info("长期记忆初始化完成")
+
+            self._initialized = True
+            logger.info("混合记忆服务初始化完成")
 
     @property
     def is_initialized(self) -> bool:
@@ -112,6 +119,9 @@ class HybridMemoryService(MemoryService):
             persist_immediately: 是否立即刷入 LTM
             **kwargs: 其他参数
         """
+        if not self._initialized:
+            await self.initialize()
+
         if not messages:
             return {"results": [], "stm_count": 0, "ltm_persisted": False}
 
@@ -167,6 +177,9 @@ class HybridMemoryService(MemoryService):
         Returns:
             记忆条目列表
         """
+        if not self._initialized:
+            await self.initialize()
+
         if not self.enable_ltm:
             logger.debug("LTM 未启用，返回空搜索结果")
             return []
@@ -189,7 +202,7 @@ class HybridMemoryService(MemoryService):
         Returns:
             消息列表
         """
-        if not self.enable_stm:
+        if not self.enable_stm or not self._initialized:
             return []
         return self._ensure_stm().get_recent(limit=limit)
 
@@ -211,12 +224,15 @@ class HybridMemoryService(MemoryService):
         Returns:
             包含 stm 和 ltm 历史的字典
         """
+        if not self._initialized:
+            await self.initialize()
+
         result = {
             "stm": [],
             "ltm": [],
         }
 
-        if include_stm and self.enable_stm:
+        if include_stm and self.enable_stm and self._stm:
             result["stm"] = self._ensure_stm().get_recent(limit=limit)
 
         if self.enable_ltm:
@@ -239,7 +255,7 @@ class HybridMemoryService(MemoryService):
             self._stm.clear()
             logger.info(f"清除 STM，用户: {user_id}")
 
-        if self.enable_ltm:
+        if self.enable_ltm and self._ltm:
             await self._ensure_ltm().clear(user_id=user_id, **kwargs)
             logger.info(f"清除 LTM，用户: {user_id}")
 
@@ -256,6 +272,9 @@ class HybridMemoryService(MemoryService):
         Returns:
             刷写结果
         """
+        if not self._initialized:
+            await self.initialize()
+
         if not self._pending_stm_messages:
             return {"results": [], "count": 0}
 

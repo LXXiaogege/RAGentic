@@ -7,13 +7,11 @@
 
 基于 LangGraph 的 QA Pipeline 重构
 使用状态图来管理复杂的 RAG 工作流
+纯 Async 架构版本
 """
 
 import asyncio
-import concurrent.futures
 import os
-import threading
-import time
 from functools import wraps
 from typing import Annotated, Any, Callable, Dict, Generator, List, Optional
 
@@ -48,9 +46,11 @@ def timing_decorator(func: Callable) -> Callable:
     """性能监控装饰器 - 记录节点执行时间"""
 
     @wraps(func)
-    def wrapper(self, state: QAState) -> QAState:
+    async def wrapper(self, state: QAState) -> QAState:
+        import time
+
         start = time.time()
-        result = func(self, state)
+        result = await func(self, state)
         duration = time.time() - start
         self.logger.info(f"{func.__name__} 耗时：{duration:.3f}s")
         return result
@@ -61,24 +61,20 @@ def timing_decorator(func: Callable) -> Callable:
 class QAState(BaseModel):
     """QA Pipeline的状态定义"""
 
-    # 核心数据
     messages: Annotated[List[Any], add_messages] = []
     original_query: str
     transformed_query: Optional[str] = None
 
-    # 运行时配置（可通过 ask() 传参覆盖）
     use_knowledge_base: Optional[bool] = None
     use_tools: Optional[bool] = None
     use_memory: Optional[bool] = None
 
-    # 检索结果
     kb_context: Optional[str] = None
     tool_context: Optional[str] = None
     final_context: Optional[str] = None
 
     error: Optional[str] = None
 
-    # Agent loop 状态
     agent_iteration: int = 0
     tool_calls_history: List[Dict[str, Any]] = []
 
@@ -114,7 +110,7 @@ def build_prompt_messages(
 
 
 class LangGraphQAPipeline:
-    """基于LangGraph的QA Pipeline"""
+    """基于LangGraph的QA Pipeline - 纯 Async 架构"""
 
     def __init__(self, config: AppConfig):
         self.logger = logger
@@ -126,7 +122,6 @@ class LangGraphQAPipeline:
         """初始化所有组件"""
         self.logger.info("初始化QA Pipeline组件...")
 
-        # 文本嵌入
         self.embeddings = TextEmbedding(self.config)
 
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -135,7 +130,6 @@ class LangGraphQAPipeline:
         )
         self.message_builder = MessageBuilder(self.config.message_builder)
 
-        # 向量数据库
         self.db_connection_manager = MilvusConnectionManager(
             self.embeddings,
             self.text_splitter,
@@ -145,10 +139,8 @@ class LangGraphQAPipeline:
             self.config.bm25,
         )
 
-        # LLM包装器
         self.llm_caller = LLMWrapper(self.config.llm)
 
-        # 查询转换器
         self.query_transformer = QueryTransformer(
             self.llm_caller,
             self.message_builder,
@@ -156,25 +148,20 @@ class LangGraphQAPipeline:
             self.db_connection_manager,
         )
 
-        # MCP客户端 (延迟初始化，复用连接)
         self._mcp_client: Optional[MCPClient] = None
         self._mcp_connected = False
         self._mcp_tools_cache: list = []
 
-        # Skills 管理器
         self.skill_manager = SkillManager(self.config.prompt.skills_dir)
 
-        # KB Tools (for agent-initiated RAG)
         self.kb_tools = KBTools(
             milvus_connection=self.db_connection_manager,
             embeddings=self.embeddings,
             search_config=self.config.retrieve,
         )
 
-        # 检查点保存器
         self.checkpointer = MemorySaver()
 
-        # 初始化 Langfuse 客户端
         self.langfuse_client = None
         self.langfuse_handler = None
         if self.config.langfuse.secret_key:
@@ -189,7 +176,6 @@ class LangGraphQAPipeline:
             except Exception as e:
                 self.logger.warning(f"Langfuse 客户端初始化失败: {e}")
 
-        # 混合记忆服务
         self._memory_settings = MemorySettings(
             stm_window_size=self.config.retrieve.memory_window_size,
             enable_ltm=getattr(self.config.memory, "enable_ltm", True)
@@ -198,15 +184,15 @@ class LangGraphQAPipeline:
         )
         self._memory_service: Optional[HybridMemoryService] = None
         self._memory_initialized = False
-        self._init_lock = threading.Lock()
+        self._memory_init_lock = asyncio.Lock()
         self.logger.info("记忆服务配置完成，将在首次使用时初始化")
 
-    def _ensure_mcp_client(self) -> MCPClient:
-        """确保 MCP 客户端已连接（懒加载，复用连接）"""
+    async def _ensure_mcp_client(self) -> MCPClient:
+        """确保 MCP 客户端已连接（懒加载，复用连接）- 纯 async"""
         if self._mcp_connected and self._mcp_client is not None:
             return self._mcp_client
 
-        with self._init_lock:
+        async with self._memory_init_lock:
             if self._mcp_connected and self._mcp_client is not None:
                 return self._mcp_client
 
@@ -214,16 +200,9 @@ class LangGraphQAPipeline:
                 self._mcp_client = MCPClient(self.llm_caller)
 
             if not self._mcp_connected:
-
-                def _connect():
-                    return asyncio.run(
-                        self._mcp_client.connect_to_server(server_script)
-                    )
-
                 project_root = _find_project_root()
                 server_script = os.path.join(project_root, "mcp_server.py")
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    executor.submit(_connect).result(timeout=15)
+                await self._mcp_client.connect_to_server(server_script)
                 self._mcp_connected = True
                 self._mcp_tools_cache = (
                     self._mcp_client._convert_mcp_tools_to_openai_format()
@@ -232,15 +211,10 @@ class LangGraphQAPipeline:
 
         return self._mcp_client
 
-    def _close_mcp_client(self) -> None:
-        """关闭 MCP 客户端连接"""
+    async def _close_mcp_client(self) -> None:
+        """关闭 MCP 客户端连接 - 纯 async"""
         if self._mcp_client is not None and self._mcp_connected:
-
-            def _cleanup():
-                return asyncio.run(self._mcp_client.cleanup())
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                executor.submit(_cleanup).result(timeout=15)
+            await self._mcp_client.cleanup()
             self._mcp_connected = False
             self._mcp_client = None
             self._mcp_tools_cache = []
@@ -262,7 +236,7 @@ class LangGraphQAPipeline:
         self.graph = workflow.compile(checkpointer=self.checkpointer)
 
     def _define_workflow(self, workflow: StateGraph):
-        """定义工作流程 - Light RAG, Heavy Agent"""
+        """定义工作流程"""
         workflow.add_edge(START, "parse_query")
 
         workflow.add_conditional_edges(
@@ -306,9 +280,8 @@ class LangGraphQAPipeline:
         workflow.add_edge("update_memory", END)
         workflow.add_edge("handle_error", END)
 
-    # =================== 节点实现 ===================
     @timing_decorator
-    def _parse_query(self, state: QAState) -> QAState:
+    async def _parse_query(self, state: QAState) -> QAState:
         """解析查询，设置默认参数"""
         try:
             self.logger.info(f"解析查询：{state.original_query}")
@@ -326,7 +299,7 @@ class LangGraphQAPipeline:
             return state
 
     @timing_decorator
-    def _agent_node(self, state: QAState) -> QAState:
+    async def _agent_node(self, state: QAState) -> QAState:
         """Agent 节点：LLM with tools，循环调用直到无 tool_calls"""
         try:
             self.logger.info(
@@ -336,7 +309,7 @@ class LangGraphQAPipeline:
             )
 
             if self.config.retrieve.use_tool:
-                openai_tools = self._get_openai_tools()
+                openai_tools = await self._get_openai_tools()
             else:
                 openai_tools = []
 
@@ -410,13 +383,13 @@ class LangGraphQAPipeline:
             state.error = f"Agent节点执行失败：{str(e)}"
             return state
 
-    def _get_openai_tools(self) -> list:
+    async def _get_openai_tools(self) -> list:
         """获取 OpenAI 格式的工具列表（复用 MCP 连接）"""
         if self._mcp_tools_cache:
             return self._mcp_tools_cache
 
         try:
-            client = self._ensure_mcp_client()
+            client = await self._ensure_mcp_client()
             self._mcp_tools_cache = client._convert_mcp_tools_to_openai_format()
             return self._mcp_tools_cache
         except Exception as e:
@@ -424,8 +397,8 @@ class LangGraphQAPipeline:
             return []
 
     @timing_decorator
-    def _tools_node(self, state: QAState) -> QAState:
-        """工具节点：执行 AIMessage 中的 tool_calls"""
+    async def _tools_node(self, state: QAState) -> QAState:
+        """工具节点：执行 AIMessage 中的 tool_calls - 纯 async"""
         try:
             last_ai = next(
                 (
@@ -448,36 +421,23 @@ class LangGraphQAPipeline:
             results_map: Dict[str, str] = {}
 
             if kb_tool_calls:
-
-                async def _run_kb_search():
-                    kb_results = []
-                    for tc in kb_tool_calls:
-                        query = tc["args"].get("query", "")
-                        top_k = tc["args"].get("top_k", 3)
-                        result = await self.kb_tools.kb_search(query, top_k)
-                        kb_results.append(result)
-                        self.logger.info(
-                            f"KB search [{query}] 返回: {result[:200] if result else '(空)'}"
-                        )
-                    return kb_results
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    kb_results = executor.submit(
-                        lambda: asyncio.run(_run_kb_search())
-                    ).result(timeout=30)
+                kb_tasks = [
+                    self.kb_tools.kb_search(
+                        query=tc["args"].get("query", ""),
+                        top_k=tc["args"].get("top_k", 3),
+                    )
+                    for tc in kb_tool_calls
+                ]
+                kb_results = await asyncio.gather(*kb_tasks)
                 for tc, result in zip(kb_tool_calls, kb_results):
                     results_map[tc["id"]] = result
+                    self.logger.info(
+                        f"KB search [{tc['args'].get('query', '')}] 返回: {result[:200] if result else '(空)'}"
+                    )
 
             if mcp_tool_calls:
-
-                async def _run_mcp_tools():
-                    client = self._ensure_mcp_client()
-                    return await client.execute_tool_calls(mcp_tool_calls)
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    mcp_results = executor.submit(
-                        lambda: asyncio.run(_run_mcp_tools())
-                    ).result(timeout=30)
+                client = await self._ensure_mcp_client()
+                mcp_results = await client.execute_tool_calls(mcp_tool_calls)
                 for tc, result in zip(mcp_tool_calls, mcp_results):
                     results_map[tc["id"]] = result
 
@@ -510,7 +470,7 @@ class LangGraphQAPipeline:
             return state
 
     @timing_decorator
-    def _generate_answer(self, state: QAState) -> QAState:
+    async def _generate_answer(self, state: QAState) -> QAState:
         """生成答案（use_tool=False 时的纯 LLM 生成路径）"""
         try:
             self.logger.info("开始生成答案")
@@ -545,20 +505,17 @@ class LangGraphQAPipeline:
             state.error = f"生成答案失败：{str(e)}"
             return state
 
-    def _ensure_memory_initialized(self) -> None:
-        """确保记忆服务已初始化（同步包装，线程安全）"""
+    async def _ensure_memory_initialized(self) -> None:
+        """确保记忆服务已初始化（async，线程安全）"""
         if self._memory_initialized:
             return
-        init_lock = getattr(self, "_init_lock", None)
-        if init_lock:
-            with init_lock:
-                if self._memory_initialized:
-                    return
-                self._init_memory()
-        else:
-            self._init_memory()
 
-    def _init_memory(self) -> None:
+        async with self._memory_init_lock:
+            if self._memory_initialized:
+                return
+            await self._init_memory()
+
+    async def _init_memory(self) -> None:
         """实际初始化记忆服务的逻辑"""
         try:
             if self._memory_service is None:
@@ -572,18 +529,15 @@ class LangGraphQAPipeline:
                     enable_ltm=self._memory_settings.enable_ltm,
                 )
 
-            def _init():
-                return asyncio.run(self._memory_service.initialize())
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                executor.submit(_init).result(timeout=30)
+            await self._memory_service.initialize()
             self._memory_initialized = True
             self.logger.info("记忆服务初始化完成")
         except Exception as e:
             self.logger.warning(f"记忆服务初始化失败: {e}，将使用简单记忆模式")
 
-    def _build_context(self, state: QAState) -> QAState:
-        """构建最终上下文"""
+    @timing_decorator
+    async def _build_context(self, state: QAState) -> QAState:
+        """构建最终上下文 - 纯 async"""
         try:
             self.logger.info("构建最终上下文")
 
@@ -597,7 +551,7 @@ class LangGraphQAPipeline:
             elif state.agent_iteration == 0 and self.config.retrieve.use_kb:
                 query = state.transformed_query or state.original_query
                 try:
-                    kb_results = self.kb_tools.kb_search(
+                    kb_results = await self.kb_tools.kb_search(
                         query, top_k=self.config.retrieve.top_k
                     )
                     if kb_results:
@@ -610,24 +564,15 @@ class LangGraphQAPipeline:
                     self.logger.warning(f"知识库检索失败: {e}")
 
             if self.config.retrieve.use_memory and self._memory_settings.enable_ltm:
-                self._ensure_memory_initialized()
+                await self._ensure_memory_initialized()
                 if self._memory_service and self._memory_service.is_initialized:
                     try:
-
-                        def _run_search():
-                            return asyncio.run(
-                                self._memory_service.search(
-                                    query=state.original_query,
-                                    user_id=self.config.retrieve.user_id or "default",
-                                    limit=self._memory_settings.ltm_search_limit,
-                                    threshold=self._memory_settings.ltm_search_threshold,
-                                )
-                            )
-
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            ltm_results = executor.submit(_run_search).result(
-                                timeout=30
-                            )
+                        ltm_results = await self._memory_service.search(
+                            query=state.original_query,
+                            user_id=self.config.retrieve.user_id or "default",
+                            limit=self._memory_settings.ltm_search_limit,
+                            threshold=self._memory_settings.ltm_search_threshold,
+                        )
                         if ltm_results:
                             ltm_context = self._memory_service.format_ltm_for_context(
                                 ltm_results, prefix="【长期记忆】"
@@ -650,11 +595,11 @@ class LangGraphQAPipeline:
             return state
 
     @timing_decorator
-    def _update_memory(self, state: QAState) -> QAState:
-        """更新记忆"""
+    async def _update_memory(self, state: QAState) -> QAState:
+        """更新记忆 - 纯 async"""
         try:
             if self.config.retrieve.use_memory and state.messages:
-                self._ensure_memory_initialized()
+                await self._ensure_memory_initialized()
                 if self._memory_service and self._memory_service.is_initialized:
                     try:
                         user_id = self.config.retrieve.user_id or "default"
@@ -670,17 +615,11 @@ class LangGraphQAPipeline:
                             and getattr(m, "content", None)
                         ]
 
-                        def _run_add():
-                            return asyncio.run(
-                                self._memory_service.add(
-                                    messages=stm_messages,
-                                    user_id=user_id,
-                                    persist_immediately=True,
-                                )
-                            )
-
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            executor.submit(_run_add).result(timeout=30)
+                        await self._memory_service.add(
+                            messages=stm_messages,
+                            user_id=user_id,
+                            persist_immediately=True,
+                        )
                         self.logger.info("记忆已存入混合记忆服务")
                     except Exception as e:
                         self.logger.warning(f"存入记忆失败: {e}")
@@ -695,23 +634,19 @@ class LangGraphQAPipeline:
             return state
 
     @timing_decorator
-    def _handle_error(self, state: QAState) -> QAState:
+    async def _handle_error(self, state: QAState) -> QAState:
         """处理错误"""
         error_msg = state.error or "未知错误"
         self.logger.error(f"处理错误: {error_msg}")
 
-        # 初始化消息历史，如果为空则创建列表
         if not hasattr(state, "messages") or state.messages is None:
             state.messages = []
 
-        # 添加错误消息到对话历史
         state.messages.append(
             AIMessage(content=f"抱歉，处理您的请求时出现错误：{error_msg}")
         )
 
         return state
-
-    # =================== 条件判断函数 ===================
 
     def _should_call_tools(self, state: QAState) -> str:
         """判断是否需要调用工具"""
@@ -754,13 +689,11 @@ class LangGraphQAPipeline:
         if state.error:
             return "error"
 
-        # agent loop 已经生成了答案，无需再调用 LLM
         if state.agent_iteration > 0:
             if self.config.retrieve.use_memory:
                 return "skip_generate"
             return "finish"
 
-        # 没有经过 agent loop（use_tool=False），需要 generate_answer
         return "generate_answer"
 
     def _should_update_memory(self, state: QAState) -> str:
@@ -774,10 +707,7 @@ class LangGraphQAPipeline:
             return "finish"
 
     def update_langfuse_trace(self, **kwargs):
-        """
-        根据传入参数更新 Langfuse trace 信息。
-        支持字段: langfuse_session_id, langfuse_user_id
-        """
+        """根据传入参数更新 Langfuse trace 信息"""
         field_map = {
             "session_id": "langfuse_session_id",
             "user_id": "langfuse_user_id",
@@ -793,11 +723,8 @@ class LangGraphQAPipeline:
             if self.langfuse_client:
                 langfuse_context.update_current_trace(**updates)
 
-    # =================== 外部接口 ===================
-
-    def ask(self, query: str, **kwargs) -> Dict[str, Any]:
-        """同步问答接口"""
-        # 创建配置对象
+    async def ask(self, query: str, **kwargs) -> Dict[str, Any]:
+        """异步问答接口"""
         config = RunnableConfig(
             configurable={
                 "thread_id": kwargs.get("thread_id", "0"),
@@ -809,19 +736,17 @@ class LangGraphQAPipeline:
 
         existing_messages = kwargs.get("messages", [])
 
-        # 初始化状态
         initial_state_object = QAState(
             original_query=query,
             messages=existing_messages,
         )
 
         try:
-            result = self.graph.invoke(initial_state_object, config)
+            result = await self.graph.ainvoke(initial_state_object, config)
 
             if result.get("error"):
                 return {"error": result["error"]}
 
-            # 提取最后的AI消息（无 tool_calls 的）作为答案
             ai_messages = [
                 msg.content
                 for msg in result.get("messages", [])
@@ -846,10 +771,15 @@ class LangGraphQAPipeline:
             self.logger.error(f"问答处理失败: {e}")
             return {"error": f"处理请求时出错: {str(e)}"}
 
-    def ask_stream(self, query: str, **kwargs) -> Generator[Dict[str, Any], None, None]:
-        """流式问答接口"""
+    def ask_sync(self, query: str, **kwargs) -> Dict[str, Any]:
+        """同步问答接口（内部使用 asyncio.run）"""
+        return asyncio.run(self.ask(query, **kwargs))
 
-        # 创建配置对象
+    async def ask_stream(
+        self, query: str, **kwargs
+    ) -> Generator[Dict[str, Any], None, None]:
+        """流式问答接口 - 纯 async"""
+
         config = RunnableConfig(
             configurable={
                 "thread_id": kwargs.get("thread_id", "0"),
@@ -859,14 +789,13 @@ class LangGraphQAPipeline:
             config["callbacks"] = [self.langfuse_handler]
             self.update_langfuse_trace(**kwargs)
 
-        # 初始化状态
         initial_state_object = QAState(
             original_query=query,
             messages=[],
         )
 
         try:
-            for event in self.graph.stream(initial_state_object, config):
+            async for event in self.graph.astream(initial_state_object, config):
                 if not event:
                     continue
                 node_name = list(event.keys())[0]
@@ -877,7 +806,6 @@ class LangGraphQAPipeline:
                         return node_state.get(key, default)
                     return getattr(node_state, key, default)
 
-                # 检查错误
                 if _get("error"):
                     yield {
                         "node": node_name,
@@ -886,7 +814,6 @@ class LangGraphQAPipeline:
                     }
                     continue
 
-                # 流式返回节点执行状态
                 yield {
                     "node": node_name,
                     "status": "processing",
@@ -897,7 +824,6 @@ class LangGraphQAPipeline:
                     },
                 }
 
-                # agent_node 完成且无 tool_calls 时，返回答案
                 if node_name in ("agent_node", "generate_answer"):
                     messages = _get("messages") or []
                     ai_msgs = [
@@ -918,9 +844,14 @@ class LangGraphQAPipeline:
             self.logger.error(f"流式问答处理失败: {e}")
             yield {"status": "error", "error": f"处理请求时出错: {str(e)}"}
 
-    def batch_ask(self, questions: List[str], **kwargs) -> List[Dict[str, Any]]:
-        """批量问答"""
-        return [self.ask(q, **kwargs) for q in questions]
+    async def batch_ask(self, questions: List[str], **kwargs) -> List[Dict[str, Any]]:
+        """批量问答 - 纯 async"""
+        tasks = [self.ask(q, **kwargs) for q in questions]
+        return await asyncio.gather(*tasks)
+
+    def batch_ask_sync(self, questions: List[str], **kwargs) -> List[Dict[str, Any]]:
+        """批量问答同步包装器"""
+        return asyncio.run(self.batch_ask(questions, **kwargs))
 
     def export_graph(self, output_path: str = "qa_pipeline_graph.png") -> str | None:
         """导出图结构"""

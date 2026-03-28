@@ -5,11 +5,16 @@
 @File ：document_loader.py
 @IDE ：PyCharm
 """
+
 from typing import List, Dict, Type
 from langchain_core.documents import Document
-from langchain_community.document_loaders import PyPDFLoader, UnstructuredMarkdownLoader, \
-    UnstructuredWordDocumentLoader, \
-    UnstructuredExcelLoader, TextLoader
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    UnstructuredMarkdownLoader,
+    UnstructuredWordDocumentLoader,
+    UnstructuredExcelLoader,
+    TextLoader,
+)
 
 from src.configs.logger_config import setup_logger
 import os
@@ -35,7 +40,9 @@ class PDFLoader(BaseLoader):
         try:
             loader = PyPDFLoader(file_path)
             documents = loader.load()
-            logger.info(f"[{class_name}] PDF文件加载完成: {file_path}, 共 {len(documents)} 页")
+            logger.info(
+                f"[{class_name}] PDF文件加载完成: {file_path}, 共 {len(documents)} 页"
+            )
             return documents
         except Exception as e:
             logger.error(f"[{class_name}] PDF文件加载失败: {file_path}, 错误: {str(e)}")
@@ -51,10 +58,14 @@ class MarkdownLoader(BaseLoader):
         try:
             loader = UnstructuredMarkdownLoader(file_path)
             documents = loader.load()
-            logger.info(f"[{class_name}] Markdown文件加载完成: {file_path}, 共 {len(documents)} 个文档块")
+            logger.info(
+                f"[{class_name}] Markdown文件加载完成: {file_path}, 共 {len(documents)} 个文档块"
+            )
             return documents
         except Exception as e:
-            logger.error(f"[{class_name}] Markdown文件加载失败: {file_path}, 错误: {str(e)}")
+            logger.error(
+                f"[{class_name}] Markdown文件加载失败: {file_path}, 错误: {str(e)}"
+            )
             raise
 
 
@@ -67,10 +78,14 @@ class DocxLoader(BaseLoader):
         try:
             loader = UnstructuredWordDocumentLoader(file_path)
             documents = loader.load()
-            logger.info(f"[{class_name}] Word文档加载完成: {file_path}, 共 {len(documents)} 个文档块")
+            logger.info(
+                f"[{class_name}] Word文档加载完成: {file_path}, 共 {len(documents)} 个文档块"
+            )
             return documents
         except Exception as e:
-            logger.error(f"[{class_name}] Word文档加载失败: {file_path}, 错误: {str(e)}")
+            logger.error(
+                f"[{class_name}] Word文档加载失败: {file_path}, 错误: {str(e)}"
+            )
             raise
 
 
@@ -83,10 +98,14 @@ class ExcelLoader(BaseLoader):
         try:
             loader = UnstructuredExcelLoader(file_path)
             documents = loader.load()
-            logger.info(f"[{class_name}] Excel文件加载完成: {file_path}, 共 {len(documents)} 个文档块")
+            logger.info(
+                f"[{class_name}] Excel文件加载完成: {file_path}, 共 {len(documents)} 个文档块"
+            )
             return documents
         except Exception as e:
-            logger.error(f"[{class_name}] Excel文件加载失败: {file_path}, 错误: {str(e)}")
+            logger.error(
+                f"[{class_name}] Excel文件加载失败: {file_path}, 错误: {str(e)}"
+            )
             raise
 
 
@@ -99,10 +118,14 @@ class TxtLoader(BaseLoader):
         try:
             loader = TextLoader(file_path)
             documents = loader.load()
-            logger.info(f"[{class_name}] 文本文件加载完成: {file_path}, 共 {len(documents)} 个文档块")
+            logger.info(
+                f"[{class_name}] 文本文件加载完成: {file_path}, 共 {len(documents)} 个文档块"
+            )
             return documents
         except Exception as e:
-            logger.error(f"[{class_name}] 文本文件加载失败: {file_path}, 错误: {str(e)}")
+            logger.error(
+                f"[{class_name}] 文本文件加载失败: {file_path}, 错误: {str(e)}"
+            )
             raise
 
 
@@ -133,20 +156,28 @@ class MineruLoader(BaseLoader):
             raise RuntimeError("MinerU PDF 解析失败")
         filename = os.path.basename(pdf_path)
         md_path = os.path.join(output_dir, filename.replace(".pdf", ".md"))
-        content_json_path = os.path.join(output_dir, filename.replace(".pdf", "content_list.json"))
+        content_json_path = os.path.join(
+            output_dir, filename.replace(".pdf", "content_list.json")
+        )
         return md_path, content_json_path
 
     def load(self, file_path: str) -> List[Document]:
         class_name = self.__class__.__name__
         logger.info(f"[{class_name}] Mineru解析pdf文件: {file_path}")
         try:
-            md_file, content_json_file = self.preprocess_pdf_with_mineru_cli(file_path, "output")
+            md_file, content_json_file = self.preprocess_pdf_with_mineru_cli(
+                file_path, "output"
+            )
             loader = UnstructuredMarkdownLoader(md_file)
             documents = loader.load()
-            logger.info(f"[{class_name}] Mineru文件加载完成: {file_path}, 共 {len(documents)} 个文档块")
+            logger.info(
+                f"[{class_name}] Mineru文件加载完成: {file_path}, 共 {len(documents)} 个文档块"
+            )
             return documents
         except Exception as e:
-            logger.error(f"[{class_name}] Mineru文件加载失败: {file_path}, 错误: {str(e)}")
+            logger.error(
+                f"[{class_name}] Mineru文件加载失败: {file_path}, 错误: {str(e)}"
+            )
             raise
 
 
@@ -159,13 +190,13 @@ class DocumentLoader:
         self.use_mineru = use_mineru
         # 注册所有加载器
         self.loaders: Dict[str, Type[BaseLoader]] = {
-            'pdf': PDFLoader,
-            'mineru': MineruLoader,
-            'md': MarkdownLoader,
-            'docx': DocxLoader,
-            'xlsx': ExcelLoader,
-            'xls': ExcelLoader,
-            'txt': TxtLoader
+            "pdf": PDFLoader,
+            "mineru": MineruLoader,
+            "md": MarkdownLoader,
+            "docx": DocxLoader,
+            "xlsx": ExcelLoader,
+            "xls": ExcelLoader,
+            "txt": TxtLoader,
         }
 
         # 创建加载器实例
@@ -173,7 +204,9 @@ class DocumentLoader:
             file_type: loader_class()
             for file_type, loader_class in self.loaders.items()
         }
-        logger.info(f"[{class_name}] 已注册的加载器类型: {', '.join(self.loaders.keys())}")
+        logger.info(
+            f"[{class_name}] 已注册的加载器类型: {', '.join(self.loaders.keys())}"
+        )
 
     def get_loader(self, file_type: str) -> BaseLoader:
         """
@@ -189,8 +222,8 @@ class DocumentLoader:
         """
         class_name = self.__class__.__name__
         logger.debug(f"[{class_name}] 尝试获取文件类型 {file_type} 的加载器")
-        if file_type == 'pdf' and self.use_mineru:
-            file_type = 'mineru'
+        if file_type == "pdf" and self.use_mineru:
+            file_type = "mineru"
         loader = self.loader_instances.get(file_type)
         if loader is None:
             logger.error(f"[{class_name}] 不支持的文件类型: {file_type}")
@@ -214,13 +247,15 @@ class DocumentLoader:
         class_name = self.__class__.__name__
         logger.info(f"[{class_name}] 开始加载文件: {file_path}")
         # 获取文件扩展名，如果没有扩展名则默认为 txt
-        file_type = file_path.split('.')[-1].lower() if '.' in file_path else 'txt'
+        file_type = file_path.split(".")[-1].lower() if "." in file_path else "txt"
         logger.debug(f"[{class_name}] 检测到文件类型: {file_type}")
 
         try:
             loader = self.get_loader(file_type)
             documents = loader.load(file_path)
-            logger.info(f"[{class_name}] 文件加载完成: {file_path}, 共 {len(documents)} 个文档块")
+            logger.info(
+                f"[{class_name}] 文件加载完成: {file_path}, 共 {len(documents)} 个文档块"
+            )
             return documents
         except Exception as e:
             logger.error(f"[{class_name}] 文件加载失败: {file_path}, 错误: {str(e)}")

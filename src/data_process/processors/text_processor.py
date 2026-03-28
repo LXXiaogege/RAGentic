@@ -5,6 +5,7 @@
 @File ：text_processor.py
 @IDE ：PyCharm
 """
+
 import re
 from langchain_core.documents import Document
 from typing import List
@@ -36,13 +37,13 @@ class TextProcessor:
         self.logger.debug(f"开始清理文本，原始长度: {len(text)}")
 
         # 处理非中文字符之间的换行符
-        pattern = re.compile(r'[^\u4e00-\u9fff](\n)[^\u4e00-\u9fff]', re.DOTALL)
-        text = re.sub(pattern, lambda match: match.group(0).replace('\n', ''), text)
+        pattern = re.compile(r"[^\u4e00-\u9fff](\n)[^\u4e00-\u9fff]", re.DOTALL)
+        text = re.sub(pattern, lambda match: match.group(0).replace("\n", ""), text)
         self.logger.debug("已处理非中文字符间的换行符")
 
         # 移除特殊字符
-        text = text.replace('•', '')
-        text = text.replace(' ', '')
+        text = text.replace("•", "")
+        text = text.replace(" ", "")
         self.logger.debug("已移除特殊字符")
 
         self.logger.debug(f"文本清理完成，处理后长度: {len(text)}")
@@ -63,7 +64,9 @@ class TextProcessor:
 
         doc.page_content = self.clean_text(doc.page_content)
 
-        self.logger.info(f"文档处理完成，内容长度从 {original_length} 变为 {len(doc.page_content)}")
+        self.logger.info(
+            f"文档处理完成，内容长度从 {original_length} 变为 {len(doc.page_content)}"
+        )
         return doc
 
     def split_documents(self, documents: List[Document]) -> List[Document]:
