@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 from langfuse.decorators import observe
 from pymilvus import AnnSearchRequest, RRFRanker
+
 try:
     # pymilvus 在不同版本里该子模块可能不存在
     from pymilvus.model.reranker import CrossEncoderRerankFunction  # type: ignore
@@ -78,7 +79,7 @@ class MilvusDataService:
                         language=self.bm25_config.bm25_language
                     )
                 )
-            except Exception as e:  # pragma: no cover
+            except (ImportError, ValueError, OSError) as e:
                 self.logger.warning(f"初始化 BM25 失败，将禁用 sparse：{e}")
         else:
             self.logger.warning(
@@ -105,7 +106,7 @@ class MilvusDataService:
                     model_name=self.rerank_config.rerank_model_path,
                     device=self.rerank_config.rerank_device,
                 )
-            except Exception as e:  # pragma: no cover
+            except (ImportError, ValueError, OSError, IOError) as e:
                 self.logger.warning(f"初始化 reranker 失败，将禁用 reranker：{e}")
         else:
             self.logger.warning(
@@ -114,7 +115,9 @@ class MilvusDataService:
 
     def load_bm25_model(self, texts: List[str]):
         if self.bm25_func is None:
-            self.logger.warning("BM25 不可用（bm25_func 未初始化），跳过 BM25 模型加载/训练")
+            self.logger.warning(
+                "BM25 不可用（bm25_func 未初始化），跳过 BM25 模型加载/训练"
+            )
             return
 
         self.logger.info("开始加载/训练 BM25 模型...")
@@ -225,7 +228,7 @@ class MilvusDataService:
             self.client.insert(
                 collection_name=self.milvus_config.collection_name, data=records
             )
-        except Exception as update_error:
+        except (IOError, OSError, RuntimeError) as update_error:
             self.logger.error(f"更新文档失败，尝试恢复旧数据: {update_error}")
             if backup_data:
                 try:
@@ -234,7 +237,7 @@ class MilvusDataService:
                         data=backup_data,
                     )
                     self.logger.info("回滚成功")
-                except Exception as rollback_error:
+                except (IOError, OSError) as rollback_error:
                     self.logger.critical(f"回滚失败，需要人工检查: {rollback_error}")
             raise
 
@@ -255,7 +258,9 @@ class MilvusDataService:
         sparse_vec = None
         if config.use_sparse:
             if self.bm25_func is None:
-                self.logger.warning("配置要求 use_sparse，但当前未启用 BM25，将改为仅 dense 检索")
+                self.logger.warning(
+                    "配置要求 use_sparse，但当前未启用 BM25，将改为仅 dense 检索"
+                )
             else:
                 self.logger.debug("生成查询的稀疏向量...")
                 sparse_vec = self.bm25_func.encode_queries([query])
@@ -301,7 +306,9 @@ class MilvusDataService:
     def rerank(self, query: str, docs, config: SearchConfig):
         """重排序"""
         if self.rerank_function is None:
-            raise RuntimeError("当前环境不支持 reranker（pymilvus.model.reranker 缺失）")
+            raise RuntimeError(
+                "当前环境不支持 reranker（pymilvus.model.reranker 缺失）"
+            )
 
         rerank_texts = []
         for hit in docs[0]:
@@ -337,7 +344,9 @@ class MilvusDataService:
 
         if config.use_reranker:
             if self.rerank_function is None:
-                self.logger.warning("配置要求 use_reranker，但当前未启用 reranker，将跳过 rerank")
+                self.logger.warning(
+                    "配置要求 use_reranker，但当前未启用 reranker，将跳过 rerank"
+                )
                 docs = docs[: config.top_k]
             else:
                 docs = await self.arerank(query, docs, config)

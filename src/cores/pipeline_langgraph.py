@@ -156,8 +156,10 @@ class LangGraphQAPipeline:
             self.db_connection_manager,
         )
 
-        # MCP客户端
-        self.mcp_client = MCPClient(self.llm_caller)
+        # MCP客户端 (延迟初始化，复用连接)
+        self._mcp_client: Optional[MCPClient] = None
+        self._mcp_connected = False
+        self._mcp_tools_cache: list = []
 
         # Skills 管理器
         self.skill_manager = SkillManager(self.config.prompt.skills_dir)
@@ -198,6 +200,51 @@ class LangGraphQAPipeline:
         self._memory_initialized = False
         self._init_lock = threading.Lock()
         self.logger.info("记忆服务配置完成，将在首次使用时初始化")
+
+    def _ensure_mcp_client(self) -> MCPClient:
+        """确保 MCP 客户端已连接（懒加载，复用连接）"""
+        if self._mcp_connected and self._mcp_client is not None:
+            return self._mcp_client
+
+        with self._init_lock:
+            if self._mcp_connected and self._mcp_client is not None:
+                return self._mcp_client
+
+            if self._mcp_client is None:
+                self._mcp_client = MCPClient(self.llm_caller)
+
+            if not self._mcp_connected:
+
+                def _connect():
+                    return asyncio.run(
+                        self._mcp_client.connect_to_server(server_script)
+                    )
+
+                project_root = _find_project_root()
+                server_script = os.path.join(project_root, "mcp_server.py")
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    executor.submit(_connect).result(timeout=15)
+                self._mcp_connected = True
+                self._mcp_tools_cache = (
+                    self._mcp_client._convert_mcp_tools_to_openai_format()
+                )
+                self.logger.info("MCP 客户端连接已建立")
+
+        return self._mcp_client
+
+    def _close_mcp_client(self) -> None:
+        """关闭 MCP 客户端连接"""
+        if self._mcp_client is not None and self._mcp_connected:
+
+            def _cleanup():
+                return asyncio.run(self._mcp_client.cleanup())
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                executor.submit(_cleanup).result(timeout=15)
+            self._mcp_connected = False
+            self._mcp_client = None
+            self._mcp_tools_cache = []
+            self.logger.info("MCP 客户端连接已关闭")
 
     def _build_graph(self):
         """构建LangGraph工作流"""
@@ -364,20 +411,17 @@ class LangGraphQAPipeline:
             return state
 
     def _get_openai_tools(self) -> list:
-        """获取 OpenAI 格式的工具列表（每次临时连接获取）"""
+        """获取 OpenAI 格式的工具列表（复用 MCP 连接）"""
+        if self._mcp_tools_cache:
+            return self._mcp_tools_cache
 
-        async def _fetch():
-            client = MCPClient(self.llm_caller)
-            try:
-                project_root = _find_project_root()
-                server_script = os.path.join(project_root, "mcp_server.py")
-                await client.connect_to_server(server_script)
-                return client._convert_mcp_tools_to_openai_format()
-            finally:
-                await client.cleanup()
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            return executor.submit(lambda: asyncio.run(_fetch())).result(timeout=15)
+        try:
+            client = self._ensure_mcp_client()
+            self._mcp_tools_cache = client._convert_mcp_tools_to_openai_format()
+            return self._mcp_tools_cache
+        except Exception as e:
+            self.logger.warning(f"获取 MCP 工具列表失败: {e}")
+            return []
 
     @timing_decorator
     def _tools_node(self, state: QAState) -> QAState:
@@ -427,14 +471,8 @@ class LangGraphQAPipeline:
             if mcp_tool_calls:
 
                 async def _run_mcp_tools():
-                    client = MCPClient(self.llm_caller)
-                    try:
-                        project_root = _find_project_root()
-                        server_script = os.path.join(project_root, "mcp_server.py")
-                        await client.connect_to_server(server_script)
-                        return await client.execute_tool_calls(mcp_tool_calls)
-                    finally:
-                        await client.cleanup()
+                    client = self._ensure_mcp_client()
+                    return await client.execute_tool_calls(mcp_tool_calls)
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     mcp_results = executor.submit(
@@ -533,7 +571,12 @@ class LangGraphQAPipeline:
                     enable_stm=self._memory_settings.enable_stm,
                     enable_ltm=self._memory_settings.enable_ltm,
                 )
-            asyncio.run(self._memory_service.initialize())
+
+            def _init():
+                return asyncio.run(self._memory_service.initialize())
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                executor.submit(_init).result(timeout=30)
             self._memory_initialized = True
             self.logger.info("记忆服务初始化完成")
         except Exception as e:

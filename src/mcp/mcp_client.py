@@ -121,9 +121,16 @@ class MCPClient:
                     return f"[Tool {tool_name} result]: {text}"
                 logger.error(f"Tool {tool_name} returned an error")
                 return f"[Error calling tool {tool_name}]"
+            except (AttributeError, RuntimeError, asyncio.TimeoutError) as e:
+                logger.error(
+                    f"Error executing tool {tool_name}: {type(e).__name__}: {e}"
+                )
+                return f"[Exception calling tool {tool_name}: {type(e).__name__}: {e}]"
             except Exception as e:
-                logger.error(f"Error executing tool {tool_name}: {str(e)}")
-                return f"[Exception calling tool {tool_name}: {e}]"
+                logger.error(
+                    f"Unexpected error executing tool {tool_name}: {type(e).__name__}: {e}"
+                )
+                return f"[Unexpected error calling tool {tool_name}: {type(e).__name__}: {e}]"
 
         return list(await asyncio.gather(*[call_single_tool(tc) for tc in tool_calls]))
 
@@ -268,6 +275,5 @@ if __name__ == "__main__":
     llm = LLMWrapper(config.llm)
     client = MCPClient(llm)
     query = "洛杉矶今天天气怎么样？"
-    # query = '今天百度第一条新闻是什么？'
     tool_result = asyncio.run(mcp_main(client, query))
     logger.info(f"工具调用结果：{tool_result}")

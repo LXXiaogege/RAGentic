@@ -10,7 +10,7 @@ import asyncio
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
+from src.configs.config import AppConfig
 from typing import Optional
 
 import chainlit as cl
@@ -18,7 +18,6 @@ from chainlit.input_widget import Slider, Switch
 
 from langfuse import Langfuse
 
-from src.configs.config import AppConfig
 from src.configs.logger_config import setup_logger
 from src.cores.pipeline_langgraph import LangGraphQAPipeline
 from src.utils.security import SecurityManager
@@ -45,8 +44,14 @@ _NODE_NAMES = {
 # Nodes that should be shown as Steps in the UI
 _SHOW_NODES = {"retrieve_knowledge", "call_tools", "transform_query"}
 
+# Streaming output chunk size (characters per chunk)
+_STREAM_CHUNK_SIZE = 6
+# Context preview max length for display
+_CONTEXT_PREVIEW_MAX_LEN = 500
+
 
 # ===== App Startup =====
+
 
 @cl.on_app_startup
 async def on_startup():
@@ -72,7 +77,25 @@ async def on_startup():
     logger.info("RAGentic pipeline 初始化完成")
 
 
+@cl.on_app_shutdown
+async def on_shutdown():
+    """清理应用资源"""
+    global _executor, _pipeline
+    logger.info("开始清理应用资源...")
+
+    if _executor:
+        _executor.shutdown(wait=False)
+        logger.info("ThreadPoolExecutor 已关闭")
+
+    if _pipeline:
+        _pipeline._close_mcp_client()
+        logger.info("Pipeline MCP 客户端已关闭")
+
+    logger.info("应用资源清理完成")
+
+
 # ===== Chat Session Start =====
+
 
 @cl.on_chat_start
 async def on_chat_start():
@@ -92,25 +115,61 @@ async def on_chat_start():
     cl.user_session.set("settings", default_settings)
 
     # Build ChatSettings panel (rendered in sidebar via config.toml)
-    settings = cl.ChatSettings([
-        Switch(id="use_kb",       label="📚 检索知识库",  initial=False,
-               description="基于本地文档回答"),
-        Switch(id="use_tool",     label="🌐 联网/工具",   initial=False,
-               description="调用搜索或外部 API"),
-        Switch(id="use_memory",   label="💬 上下文记忆",  initial=False,
-               description="记住多轮对话内容"),
-        Slider(id="top_k",        label="检索数量 (Top-K)", initial=5,
-               min=1, max=20, step=1,
-               description="知识库检索返回的文档数量"),
-        Switch(id="use_stream",   label="⚡ 流式输出",    initial=True,
-               description="逐字流式返回答案"),
-        Switch(id="use_sparse",   label="🔀 混合检索",    initial=False,
-               description="稠密 + 稀疏 (BM25) 混合检索"),
-        Switch(id="use_reranker", label="🎯 重排序",      initial=False,
-               description="BGE reranker 精排"),
-        Switch(id="enable_think", label="🧠 深度思考",    initial=False,
-               description="启用 R1 推理模式"),
-    ])
+    settings = cl.ChatSettings(
+        [
+            Switch(
+                id="use_kb",
+                label="📚 检索知识库",
+                initial=False,
+                description="基于本地文档回答",
+            ),
+            Switch(
+                id="use_tool",
+                label="🌐 联网/工具",
+                initial=False,
+                description="调用搜索或外部 API",
+            ),
+            Switch(
+                id="use_memory",
+                label="💬 上下文记忆",
+                initial=False,
+                description="记住多轮对话内容",
+            ),
+            Slider(
+                id="top_k",
+                label="检索数量 (Top-K)",
+                initial=5,
+                min=1,
+                max=20,
+                step=1,
+                description="知识库检索返回的文档数量",
+            ),
+            Switch(
+                id="use_stream",
+                label="⚡ 流式输出",
+                initial=True,
+                description="逐字流式返回答案",
+            ),
+            Switch(
+                id="use_sparse",
+                label="🔀 混合检索",
+                initial=False,
+                description="稠密 + 稀疏 (BM25) 混合检索",
+            ),
+            Switch(
+                id="use_reranker",
+                label="🎯 重排序",
+                initial=False,
+                description="BGE reranker 精排",
+            ),
+            Switch(
+                id="enable_think",
+                label="🧠 深度思考",
+                initial=False,
+                description="启用 R1 推理模式",
+            ),
+        ]
+    )
     await settings.send()
 
     # Welcome message with action buttons
@@ -129,6 +188,7 @@ async def on_chat_start():
 
 # ===== Settings Update =====
 
+
 @cl.on_settings_update
 async def on_settings_update(settings: dict):
     cl.user_session.set("settings", settings)
@@ -136,6 +196,7 @@ async def on_settings_update(settings: dict):
 
 
 # ===== Action Callbacks =====
+
 
 def _make_actions():
     return [
@@ -161,10 +222,7 @@ async def on_new_chat(action: cl.Action):
 
     actions = _make_actions()
     await cl.Message(
-        content=(
-            "---\n"
-            f"**新对话已开始。**\n> 会话 ID：`{new_session_id}`"
-        ),
+        content=(f"---\n**新对话已开始。**\n> 会话 ID：`{new_session_id}`"),
         author="RAGentic",
         actions=actions,
     ).send()
@@ -179,15 +237,14 @@ async def on_clear_memory(action: cl.Action):
 
     actions = _make_actions()
     await cl.Message(
-        content=(
-            f"记忆已清空。\n> 新会话 ID：`{new_session_id}`"
-        ),
+        content=(f"记忆已清空。\n> 新会话 ID：`{new_session_id}`"),
         author="RAGentic",
         actions=actions,
     ).send()
 
 
 # ===== Main Message Handler =====
+
 
 @cl.on_message
 async def on_message(message: cl.Message):
@@ -206,26 +263,25 @@ async def on_message(message: cl.Message):
     session_id = cl.user_session.get("session_id") or str(uuid.uuid4())
     settings = cl.user_session.get("settings") or {}
 
-    use_kb       = bool(settings.get("use_kb",       False))
-    use_tool     = bool(settings.get("use_tool",      False))
-    use_memory   = bool(settings.get("use_memory",    False))
-    top_k        = int(settings.get("top_k",          5))
-    use_stream   = bool(settings.get("use_stream",    True))
-    use_sparse   = bool(settings.get("use_sparse",    False))
-    use_reranker = bool(settings.get("use_reranker",  False))
-    enable_think = bool(settings.get("enable_think",  False))
+    use_kb = bool(settings.get("use_kb", False))
+    use_tool = bool(settings.get("use_tool", False))
+    use_memory = bool(settings.get("use_memory", False))
+    top_k = int(settings.get("top_k", 5))
+    use_stream = bool(settings.get("use_stream", True))
+    use_sparse = bool(settings.get("use_sparse", False))
+    use_reranker = bool(settings.get("use_reranker", False))
+    enable_think = bool(settings.get("enable_think", False))
 
-    # Build per-request config (deepcopy mirrors web_app.py pattern)
-    req_config = deepcopy(_app_config)
-    req_config.retrieve.use_kb       = use_kb
-    req_config.retrieve.use_tool     = use_tool
-    req_config.retrieve.use_memory   = use_memory
-    req_config.retrieve.top_k        = top_k
-    req_config.retrieve.use_sparse   = use_sparse
-    req_config.retrieve.use_reranker = use_reranker
-    req_config.retrieve.extra_body   = {
-        "chat_template_kwargs": {"enable_thinking": enable_think}
-    }
+    # Build per-request config (avoids deepcopy of expensive objects)
+    req_config = _app_config.create_request_config(
+        use_kb=use_kb,
+        use_tool=use_tool,
+        use_memory=use_memory,
+        top_k=top_k,
+        use_sparse=use_sparse,
+        use_reranker=use_reranker,
+        extra_body={"chat_template_kwargs": {"enable_thinking": enable_think}},
+    )
 
     # Inject config (lock ensures no concurrent mutation)
     async with _pipeline_lock:
@@ -237,6 +293,7 @@ async def on_message(message: cl.Message):
 
 
 # ===== Streaming Handler =====
+
 
 async def _handle_stream(query: str, session_id: str):
     """
@@ -278,7 +335,7 @@ async def _handle_stream(query: str, session_id: str):
             break
 
         status = event.get("status")
-        node   = event.get("node", "")
+        node = event.get("node", "")
 
         if status == "error":
             err_text = event.get("error", "未知错误")
@@ -302,7 +359,7 @@ async def _handle_stream(query: str, session_id: str):
             await active_step.__aexit__(None, None, None)
 
         elif status == "complete" and node == "generate_answer":
-            answer  = event.get("answer", "")
+            answer = event.get("answer", "")
             context = event.get("context", "") or ""
 
             if not answer_started:
@@ -310,14 +367,17 @@ async def _handle_stream(query: str, session_id: str):
                 answer_started = True
 
             # Simulate streaming by sending in small chunks
-            chunk_size = 6
-            for i in range(0, len(answer), chunk_size):
-                await answer_msg.stream_token(answer[i : i + chunk_size])
+            for i in range(0, len(answer), _STREAM_CHUNK_SIZE):
+                await answer_msg.stream_token(answer[i : i + _STREAM_CHUNK_SIZE])
                 await asyncio.sleep(0)  # yield control to event loop
 
             # Attach context as a side element if available
             if context:
-                ctx_preview = context[:500] + "\n\n...(截断)" if len(context) > 500 else context
+                ctx_preview = (
+                    context[:_CONTEXT_PREVIEW_MAX_LEN] + "\n\n...(截断)"
+                    if len(context) > _CONTEXT_PREVIEW_MAX_LEN
+                    else context
+                )
                 answer_msg.elements = [
                     cl.Text(
                         name="📚 检索参考源",
@@ -333,6 +393,7 @@ async def _handle_stream(query: str, session_id: str):
 
 
 # ===== Sync (Non-streaming) Handler =====
+
 
 async def _handle_sync(query: str, session_id: str):
     """Non-streaming fallback: run pipeline.ask() in a thread pool."""
@@ -353,17 +414,19 @@ async def _handle_sync(query: str, session_id: str):
         return
 
     if result.get("error"):
-        await cl.Message(
-            content=f"❌ 错误：{result['error']}", author="System"
-        ).send()
+        await cl.Message(content=f"❌ 错误：{result['error']}", author="System").send()
         return
 
-    answer  = result.get("answer", "无法生成答案")
+    answer = result.get("answer", "无法生成答案")
     context = result.get("context", "") or result.get("kb_context", "")
 
     elements = []
     if context:
-        ctx_preview = context[:500] + "\n\n...(截断)" if len(context) > 500 else context
+        ctx_preview = (
+            context[:_CONTEXT_PREVIEW_MAX_LEN] + "\n\n...(截断)"
+            if len(context) > _CONTEXT_PREVIEW_MAX_LEN
+            else context
+        )
         elements.append(
             cl.Text(
                 name="📚 检索参考源",
@@ -376,6 +439,7 @@ async def _handle_sync(query: str, session_id: str):
 
 
 # ===== Starter Examples =====
+
 
 @cl.set_starters
 async def set_starters():
@@ -396,6 +460,7 @@ async def set_starters():
 
 
 # ===== Helper Functions =====
+
 
 def _format_step_output(node: str, state: dict) -> str:
     if node == "retrieve_knowledge":

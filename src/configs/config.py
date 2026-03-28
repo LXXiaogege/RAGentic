@@ -7,8 +7,7 @@
 """
 
 from pydantic_settings import BaseSettings
-from pydantic_settings import SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, ConfigDict
 
 from src.configs.evaluate_config import EvaluationConfig
 from src.configs.memory_config import Mem0Config
@@ -84,7 +83,7 @@ class AppConfig(BaseSettings):
         default_factory=LangfuseConfig, description="Langfuse 配置"
     )
 
-    model_config = SettingsConfigDict(
+    model_config = ConfigDict(
         case_sensitive=False,
         extra="ignore",
         protected_namespaces=(),
@@ -220,3 +219,52 @@ class AppConfig(BaseSettings):
         for name, path in path_configs:
             if path and not Path(path).exists():
                 logger.warning(f"{name} 不存在：{path}")
+
+    def create_request_config(
+        self,
+        use_kb: bool = None,
+        use_tool: bool = None,
+        use_memory: bool = None,
+        top_k: int = None,
+        use_sparse: bool = None,
+        use_reranker: bool = None,
+        extra_body: dict = None,
+    ) -> "AppConfig":
+        """创建请求特定的配置（避免 deepcopy 整个 AppConfig）
+
+        只复制检索相关的设置，共享其他expensive对象（LLM, Milvus连接等）
+        """
+        new_retrieve = self.retrieve.model_copy(
+            update={
+                k: v
+                for k, v in {
+                    "use_kb": use_kb,
+                    "use_tool": use_tool,
+                    "use_memory": use_memory,
+                    "top_k": top_k,
+                    "use_sparse": use_sparse,
+                    "use_reranker": use_reranker,
+                    "extra_body": extra_body,
+                }.items()
+                if v is not None
+            }
+        )
+
+        new_config = AppConfig.__new__(AppConfig)
+        new_config.debug = self.debug
+        new_config.llm = self.llm
+        new_config.embedding = self.embedding
+        new_config.reranker = self.reranker
+        new_config.bm25 = self.bm25
+        new_config.retrieve = new_retrieve
+        new_config.splitter = self.splitter
+        new_config.milvus = self.milvus
+        new_config.neo4j = self.neo4j
+        new_config.redis = self.redis
+        new_config.memory = self.memory
+        new_config.prompt = self.prompt
+        new_config.message_builder = self.message_builder
+        new_config.tools = self.tools
+        new_config.evaluation = self.evaluation
+        new_config.langfuse = self.langfuse
+        return new_config
