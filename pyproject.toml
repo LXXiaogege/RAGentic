@@ -38,6 +38,10 @@ dependencies = [
     # Web 界面
     "gradio>=5.0.0,<6.0.0",
     "chainlit>=2.10.0,<3.0.0",
+    # API Server
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.30.0,<1.0.0",
+    "pydantic>=2.0.0,<3.0.0",
     # 安全
     "cryptography>=42.0.0,<43.0.0",
     "slowapi>=0.1.9,<0.2.0",

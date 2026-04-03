@@ -119,7 +119,15 @@ class LLMWrapper:
                 base_url=self.config.base_url,
                 provider=self.config.model.split("/")[0] if "/" in self.config.model else "openai",
             )
-        elif self.config.provider in ("openai", "minimax"):
+        elif self.config.provider == "minimax":
+            from src.models.llm_litellm import LiteLLMWrapper
+
+            self.client = LiteLLMWrapper(
+                api_key=self.config.api_key,
+                base_url=self.config.base_url,
+                provider="minimax",
+            )
+        elif self.config.provider == "openai":
             self.client = OpenAILLM(self.config.api_key, self.config.base_url)
         else:
             raise ValueError(f"暂不支持的模型提供商：{self.config.provider}")
@@ -315,7 +323,7 @@ class LLMWrapper:
 
         messages_to_send = self.convert_messages_to_dicts(messages) if messages and isinstance(messages[0], BaseMessage) else messages
         response = await self.client.achat(
-            model=self.config.model, messages=messages_to_send, stream=stream, **kwargs
+            model=self.config.model, messages=messages_to_send, stream=stream, return_raw=True, **kwargs
         )
 
         if return_raw or stream:

@@ -64,7 +64,12 @@ class LiteLLMClient:
     ):
         self.logger.info(f"[LiteLLM] chat request: model={model}, stream={stream}")
 
-        if self.provider != "openai" and not model.startswith(self.provider + "/"):
+        if self.provider == "minimax":
+            # MiniMax 需要用 OpenAI 兼容模式，传递 custom_llm_provider
+            if model.startswith("minimax/"):
+                model = model[len("minimax/"):]
+            kwargs["custom_llm_provider"] = "openai"
+        elif self.provider != "openai" and not model.startswith(self.provider + "/"):
             model = f"{self.provider}/{model}"
 
         kwargs = self._prepare_kwargs(kwargs)
@@ -92,7 +97,12 @@ class LiteLLMClient:
     ):
         self.logger.info(f"[LiteLLM] achat request: model={model}, stream={stream}")
 
-        if self.provider != "openai" and not model.startswith(self.provider + "/"):
+        if self.provider == "minimax":
+            # MiniMax 需要用 OpenAI 兼容模式，传递 custom_llm_provider
+            if model.startswith("minimax/"):
+                model = model[len("minimax/"):]
+            kwargs["custom_llm_provider"] = "openai"
+        elif self.provider != "openai" and not model.startswith(self.provider + "/"):
             model = f"{self.provider}/{model}"
 
         kwargs = self._prepare_kwargs(kwargs)
