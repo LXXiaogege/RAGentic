@@ -35,6 +35,7 @@ class KBTools:
         self,
         query: str,
         top_k: int = 3,
+        use_hyde: bool = False,
         hyde_vector: Optional[List[float]] = None,
     ) -> str:
         """
@@ -44,13 +45,14 @@ class KBTools:
         Args:
             query: Search query (used as text query fallback when hyde_vector is provided)
             top_k: Number of documents to retrieve (default 3)
+            use_hyde: Whether to use HyDE retrieval enhancement (default False)
             hyde_vector: Optional HyDE vector to use for semantic search
 
         Returns:
             Formatted string with retrieved document chunks
         """
         try:
-            logger.info(f"KB search: query={query}, top_k={top_k}, hyde_vector={hyde_vector is not None}")
+            logger.info(f"KB search: query={query}, top_k={top_k}, use_hyde={use_hyde}")
 
             config = SearchConfig(
                 top_k=top_k,
@@ -60,6 +62,7 @@ class KBTools:
             )
 
             search_query: Any = hyde_vector if hyde_vector else query
+
             results = await self.milvus.asearch(search_query, config)
 
             if not results:

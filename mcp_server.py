@@ -128,14 +128,30 @@ def read_skill(name: str) -> str:
 
 # ---- Knowledge Base search tool ----
 @main_mcp.tool()
-async def kb_search(query: str, top_k: int = 3) -> str:
+async def kb_search(query: str, top_k: int = 3, use_hyde: bool = False) -> str:
     """搜索知识库获取相关文档。当你需要查询特定事实、信息或知识时调用此工具。
 
     Args:
         query: 搜索查询词或问题
         top_k: 返回的文档数量，默认3条
+        use_hyde: 是否使用 HyDE 检索增强模式，默认关闭
     """
     return "[KB_SEARCH_PLACEHOLDER] 此工具由Pipeline直接执行"
+
+
+# ---- Query rewrite tool ----
+@main_mcp.tool()
+async def query_rewrite(query: str, mode: str = "rewrite") -> str:
+    """将用户查询改写为更精确的表述。支持三种模式：
+    - rewrite: 简单改写，让查询更清晰准确
+    - step_back: 生成泛化查询，用于检索更广泛的相关信息
+    - sub_query: 分解为多个子查询，分别检索后合并结果
+
+    Args:
+        query: 原始用户查询
+        mode: 改写模式，可选 rewrite/step_back/sub_query
+    """
+    return "[QUERY_REWRITE_PLACEHOLDER] 此工具由Pipeline直接执行"
 
 
 if __name__ == "__main__":

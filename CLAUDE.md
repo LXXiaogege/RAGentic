@@ -30,6 +30,9 @@ PYTHONPATH=. uv run pytest tests/
 # Run a specific test
 PYTHONPATH=. uv run pytest tests/test_pipeline_nodes.py::TestClassName::test_method_name
 
+# Run pipeline graph structure test
+PYTHONPATH=. uv run pytest tests/test_pipeline_graph.py -v
+
 # Start the MCP server
 PYTHONPATH=. uv run python mcp_server.py
 ```
@@ -41,18 +44,19 @@ PYTHONPATH=. uv run python mcp_server.py
 The core is `src/cores/pipeline_langgraph.py` — `LangGraphQAPipeline` defines a directed graph where nodes are pipeline stages:
 
 ```
-parse_query → agent_node → tools_node → build_context → generate_answer → update_memory
-                    ↑
-                    └──(loop if tool_calls)
+START → agent_node → tools_node → build_context → generate_answer → update_memory → END
+              ↑               │
+              └─────(loop)────┘
 ```
 
-- `parse_query`: Initialize state parameters
-- `agent_node`: LLM with tools, loops until no more tool_calls
-- `tools_node`: Execute tool calls (MCP tools + kb_search)
+- `agent_node`: LLM with tools, Agent 完全自主决定是否调用工具（无 use_tools 配置）
+- `tools_node`: Execute tool calls (MCP tools + kb_search + query_rewrite)
 - `build_context`: Assemble final context from tool results, KB, memory
 - `generate_answer`: Generate final answer (when not using agent loop)
 - `update_memory`: Persist to hybrid memory (STM + Mem0 LTM)
 - `src/cores/bounded_memory_saver.py`: Bounded memory persistence for long sessions
+
+Configuration (use_kb, use_memory) is passed at the `ask()` / `ask_stream()` entry point.
 
 Public API:
 - `pipeline.ask(query, config?)` → async dict with `answer`
@@ -71,9 +75,9 @@ Config files:
 - `logger_config.py`: Logging configuration
 
 Key config flags in `SearchConfig` (via `config.retrieve`):
-- `use_kb` / `use_tool` / `use_memory` — enable retrieval stages
+- `use_kb` / `use_memory` — enable knowledge base and memory
 - `use_sparse` / `use_reranker` — retrieval quality enhancements
-- `use_rewrite` / `rewrite_mode` — query transformation (`hyde`, `step_back`, `sub_query`)
+- `use_rewrite` / `rewrite_mode` — **[Deprecated]** query transformation is now an Agent tool
 
 ### LLM Models
 
@@ -130,10 +134,19 @@ Retrieval supports dense (semantic), sparse (BM25), and hybrid search with optio
 
 ### Tools & MCP
 
-External tools (weather, web search, kb_search) are invoked via the MCP protocol:
+External tools (weather, web search, kb_search, query_rewrite) are invoked via the MCP protocol:
 - `src/mcp/mcp_client.py`: MCP client for tool calls
 - `src/mcp/server/`: MCP server implementations (`kb_tools.py`, `weather.py`, `web_crawl.py`)
 - `src/agent/tools.py`: `WebSpider` for web crawling
+
+Key tools:
+- `kb_search(query, top_k, use_hyde)`: Knowledge base retrieval, supports HyDE enhancement via `use_hyde` parameter
+- `query_rewrite(query, mode)`: Query transformation tool, supports `rewrite` / `step_back` / `sub_query` modes
+- `weather_get_alerts` / `weather_get_forecast`: Weather information
+- `web_crawl(url)`: Web page content extraction
+- `read_skill(name)`: Skill instruction reader
+
+HyDE (Hypothetical Document Embeddings) is a retrieval enhancement technique — when `use_hyde=True`, the tool generates hypothetical answer embeddings for better semantic search. Agent decides when to use it based on query complexity.
 
 ### Memory (Hybrid)
 

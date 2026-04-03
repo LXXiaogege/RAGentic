@@ -231,7 +231,6 @@ class LangGraphQAPipeline:
         """构建LangGraph工作流"""
         workflow = StateGraph(QAState)
 
-        workflow.add_node("parse_query", self._parse_query)
         workflow.add_node("agent_node", self._agent_node)
         workflow.add_node("tools_node", self._tools_node)
         workflow.add_node("build_context", self._build_context)
@@ -244,17 +243,7 @@ class LangGraphQAPipeline:
 
     def _define_workflow(self, workflow: StateGraph):
         """定义工作流程"""
-        workflow.add_edge(START, "parse_query")
-
-        workflow.add_conditional_edges(
-            "parse_query",
-            self._should_call_tools,
-            {
-                "call_agent": "agent_node",
-                "skip_tools": "build_context",
-                "error": "handle_error",
-            },
-        )
+        workflow.add_edge(START, "agent_node")
 
         workflow.add_conditional_edges(
             "agent_node",
@@ -287,54 +276,6 @@ class LangGraphQAPipeline:
         workflow.add_edge("update_memory", END)
         workflow.add_edge("handle_error", END)
 
-    @langfuse_context.observe(name="pipeline._parse_query")
-    @timing_decorator
-    async def _parse_query(self, state: QAState) -> QAState:
-        """解析查询，设置默认参数"""
-        try:
-            self.logger.info(f"解析查询：{state.original_query}")
-            if state.use_knowledge_base is None:
-                state.use_knowledge_base = self.config.retrieve.use_kb
-            if state.use_tools is None:
-                state.use_tools = self.config.retrieve.use_tool
-            if state.use_memory is None:
-                state.use_memory = self.config.retrieve.use_memory
-            state.error = None
-
-            # 查询改写
-            if self.config.retrieve.use_rewrite and self.query_transformer:
-                mode = self.config.retrieve.rewrite_mode
-                self.logger.info(f"启用查询改写，模式：{mode}")
-                try:
-                    if mode == "hyde":
-                        # HyDE 模式：生成假设性答案向量，存入 state.hyde_vector
-                        hyde_vector = await self.query_transformer.generate_hyde_vector(
-                            state.original_query,
-                            num_hypo=self.config.retrieve.num_hypo,
-                        )
-                        if hyde_vector:
-                            state.transformed_query = state.original_query
-                            state.hyde_vector = hyde_vector
-                            self.logger.info("HyDE 向量生成成功")
-                        else:
-                            state.transformed_query = None
-                            self.logger.warning("HyDE 向量生成失败，回退到原始查询")
-                    else:
-                        # step_back / sub_query 模式：直接获取变换后的文本
-                        rewritten = self.query_transformer.transform_query(
-                            state.original_query, mode=mode
-                        )
-                        state.transformed_query = rewritten
-                        self.logger.info(f"查询改写成功：{rewritten[:50]}...")
-                except Exception as e:
-                    self.logger.warning(f"查询改写失败：{e}，使用原始查询")
-                    state.transformed_query = None
-
-            return state
-        except Exception as e:
-            self.logger.exception(f"解析查询失败：{e}")
-            state.error = f"解析查询失败：{str(e)}"
-            return state
 
     @langfuse_context.observe(name="pipeline._agent_node")
     @timing_decorator
@@ -585,6 +526,7 @@ class LangGraphQAPipeline:
                 )
 
             kb_tool_calls = []
+            rewrite_tool_calls = []
             mcp_tool_calls = []
             for tc in tool_calls:
                 if not isinstance(tc, dict):
@@ -594,13 +536,34 @@ class LangGraphQAPipeline:
                     continue
                 if tc.get("name") == "kb_search":
                     kb_tool_calls.append(tc)
+                elif tc.get("name") == "query_rewrite":
+                    rewrite_tool_calls.append(tc)
                 else:
                     mcp_tool_calls.append(tc)
             self.logger.info(
-                f"[TOOLS_NODE]   kb_tool_calls={len(kb_tool_calls)}, mcp_tool_calls={len(mcp_tool_calls)}"
+                f"[TOOLS_NODE]   kb_tool_calls={len(kb_tool_calls)}, rewrite_tool_calls={len(rewrite_tool_calls)}, mcp_tool_calls={len(mcp_tool_calls)}"
             )
 
             results_map: Dict[str, str] = {}
+
+            # Handle query_rewrite tool directly (like kb_search)
+            if rewrite_tool_calls:
+                self.logger.info(
+                    f"[TOOLS_NODE]   准备执行 query_rewrite，共 {len(rewrite_tool_calls)} 个"
+                )
+                for tc in rewrite_tool_calls:
+                    args = tc.get("args", {}) if isinstance(tc.get("args"), dict) else {}
+                    query = args.get("query", "") if isinstance(args, dict) else ""
+                    mode = args.get("mode", "rewrite") if isinstance(args, dict) else "rewrite"
+                    try:
+                        rewritten = self.query_transformer.transform_query(query, mode=mode)
+                        results_map[tc["id"]] = f"改写后查询：{rewritten}"
+                        self.logger.info(
+                            f"[TOOLS_NODE]   query_rewrite [{query}] ({mode}) => {rewritten[:50]}..."
+                        )
+                    except Exception as e:
+                        results_map[tc["id"]] = f"查询改写失败: {str(e)}"
+                        self.logger.warning(f"[TOOLS_NODE]   query_rewrite error: {e}")
 
             if kb_tool_calls:
                 self.logger.info(
@@ -613,10 +576,21 @@ class LangGraphQAPipeline:
                     )
                     query = args.get("query", "") if isinstance(args, dict) else ""
                     top_k = args.get("top_k", 3) if isinstance(args, dict) else 3
+                    use_hyde = args.get("use_hyde", False) if isinstance(args, dict) else False
+                    # Generate HyDE vector if use_hyde=True and not already provided
+                    hyde_vector = getattr(state, "hyde_vector", None)
+                    if use_hyde and not hyde_vector and self.query_transformer:
+                        try:
+                            hyde_vector = await self.query_transformer.generate_hyde_vector(
+                                query, num_hypo=self.config.retrieve.num_hypo
+                            )
+                            self.logger.info("HyDE vector generated in tools_node")
+                        except Exception as e:
+                            self.logger.warning(f"HyDE vector generation failed: {e}")
                     kb_tasks.append(self.kb_tools.kb_search(
                         query=query,
                         top_k=top_k,
-                        hyde_vector=getattr(state, "hyde_vector", None),
+                        hyde_vector=hyde_vector,
                     ))
                 kb_results = await asyncio.gather(*kb_tasks)
                 for tc, result in zip(kb_tool_calls, kb_results):
@@ -921,25 +895,6 @@ class LangGraphQAPipeline:
 
         return state
 
-    def _should_call_tools(self, state: QAState) -> str:
-        """判断是否需要调用工具"""
-        self.logger.info(
-            f"[SHOULD_CALL_TOOLS] >>> use_tool={self.config.retrieve.use_tool}, use_kb={self.config.retrieve.use_kb}, error={state.error}"
-        )
-        if state.error:
-            self.logger.info("[SHOULD_CALL_TOOLS] <<< returning 'error'")
-            return "error"
-
-        if self.config.retrieve.use_tool:
-            self.logger.info("[SHOULD_CALL_TOOLS] <<< returning 'call_agent'")
-            return "call_agent"
-        elif self.config.retrieve.use_kb:
-            self.logger.info("[SHOULD_CALL_TOOLS] <<< returning 'skip_tools' (use_kb)")
-            return "skip_tools"
-        else:
-            self.logger.info("[SHOULD_CALL_TOOLS] <<< returning 'skip_tools' (else)")
-            return "skip_tools"
-
     def _should_continue_agent_loop(self, state: QAState) -> str:
         """判断 agent loop 是否继续"""
         self.logger.info(
@@ -1039,6 +994,8 @@ class LangGraphQAPipeline:
         initial_state_object = QAState(
             original_query=query,
             messages=existing_messages,
+            use_knowledge_base=self.config.retrieve.use_kb,
+            use_memory=self.config.retrieve.use_memory,
         )
 
         try:
@@ -1105,6 +1062,8 @@ class LangGraphQAPipeline:
             original_query=query,
             messages=[],
             stream=True,
+            use_knowledge_base=self.config.retrieve.use_kb,
+            use_memory=self.config.retrieve.use_memory,
         )
 
         current_answer = []

@@ -47,8 +47,14 @@ class SearchConfig(BaseModel):
     use_sparse: bool = False
     use_reranker: bool = False
 
-    use_rewrite: bool = Field(False, description="是否启用查询改写")
-    rewrite_mode: str = Field("hyde", description="查询改写模式: hyde / step_back / sub_query")
+    use_rewrite: bool = Field(
+        False,
+        description="[Deprecated] 查询改写已移至 query_rewrite tool，由 Agent 按需调用"
+    )
+    rewrite_mode: str = Field(
+        "hyde",
+        description="[Deprecated] 查询改写已移至 query_rewrite tool，支持 rewrite/step_back/sub_query 模式"
+    )
 
     use_memory: bool = False
     memory_window_size: int = Field(5, ge=1)
