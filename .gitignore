@@ -42,6 +42,9 @@ venv.bak/
 # Claude Code local config
 .claude/
 
+# OpenSpec
+openspec
+
 # GitHub Actions workflows
 !.github/
 
@@ -133,18 +136,16 @@ cython_debug/
 *.ckpt
 *.safetensors
 
-# Data files
+# Data files (sample/test data only, not config or code)
 *.csv
-*.json
 *.jsonl
-*.txt
-!requirements.txt
-!README.txt
 *.xlsx
 *.xls
 *.db
 *.sqlite
 *.sqlite3
+data/*
+!data/
 
 # Temporary files
 *.tmp
@@ -159,5 +160,4 @@ config/*.yml
 *.yml
 
 *.jpg
-data/
 *.mmd

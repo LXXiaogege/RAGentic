@@ -55,5 +55,17 @@ class MemorySettings(BaseModel):
         description="长期记忆搜索相似度阈值（None 表示不限制）",
     )
 
+    max_memories: int = Field(
+        default=100,
+        ge=1,
+        description="长期记忆数量上限，超过则触发摘要整合",
+    )
+
+    memory_ttl_days: int = Field(
+        default=30,
+        ge=1,
+        description="记忆 TTL 过期天数",
+    )
+
     class Config:
         frozen = False

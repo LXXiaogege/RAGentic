@@ -65,8 +65,6 @@ async def on_chat_start():
     cl.user_session.set("session_id", session_id)
 
     default_settings = {
-        "use_kb": False,
-        "use_tool": False,
         "use_memory": False,
         "top_k": 5,
         "use_stream": True,
@@ -78,18 +76,6 @@ async def on_chat_start():
 
     settings = cl.ChatSettings(
         [
-            Switch(
-                id="use_kb",
-                label="📚 检索知识库",
-                initial=False,
-                description="基于本地文档回答",
-            ),
-            Switch(
-                id="use_tool",
-                label="🌐 联网/工具",
-                initial=False,
-                description="调用搜索或外部 API",
-            ),
             Switch(
                 id="use_memory",
                 label="💬 上下文记忆",
@@ -148,8 +134,10 @@ async def on_chat_start():
 
 @cl.on_settings_update
 async def on_settings_update(settings: dict):
-    cl.user_session.set("settings", settings)
-    logger.debug(f"设置已更新: {settings}")
+    current = cl.user_session.get("settings") or {}
+    current.update(settings)
+    cl.user_session.set("settings", current)
+    logger.info(f"[SETTINGS_UPDATE] new settings: {current}")
 
 
 def _make_actions():
@@ -209,9 +197,8 @@ async def on_message(message: cl.Message):
 
     session_id = cl.user_session.get("session_id") or str(uuid.uuid4())
     settings = cl.user_session.get("settings") or {}
+    logger.info(f"[HANDLE_MESSAGE] session_id={session_id}, settings={settings}")
 
-    use_kb = bool(settings.get("use_kb", False))
-    use_tool = bool(settings.get("use_tool", False))
     use_memory = bool(settings.get("use_memory", False))
     top_k = int(settings.get("top_k", 5))
     use_stream = bool(settings.get("use_stream", True))
@@ -223,8 +210,6 @@ async def on_message(message: cl.Message):
         await _handle_stream(
             query,
             session_id,
-            use_kb,
-            use_tool,
             use_memory,
             top_k,
             use_sparse,
@@ -235,8 +220,6 @@ async def on_message(message: cl.Message):
         await _handle_sync(
             query,
             session_id,
-            use_kb,
-            use_tool,
             use_memory,
             top_k,
             use_sparse,
@@ -246,15 +229,15 @@ async def on_message(message: cl.Message):
 
 
 async def _get_pipeline_and_config(
-    use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think
+    use_memory, top_k, use_sparse, use_reranker, enable_think
 ):
     """获取 pipeline 实例和请求配置"""
 
     config = AppConfig()
 
     req_config = config.create_request_config(
-        use_kb=use_kb,
-        use_tool=use_tool,
+        use_kb=True,
+        use_tool=True,
         use_memory=use_memory,
         top_k=top_k,
         use_sparse=use_sparse,
@@ -269,8 +252,6 @@ async def _get_pipeline_and_config(
 async def _handle_stream(
     query: str,
     session_id: str,
-    use_kb: bool,
-    use_tool: bool,
     use_memory: bool,
     top_k: int,
     use_sparse: bool,
@@ -279,7 +260,7 @@ async def _handle_stream(
 ):
     """流式处理 - 纯 async"""
     pipeline = await _get_pipeline_and_config(
-        use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think
+        use_memory, top_k, use_sparse, use_reranker, enable_think
     )
 
     answer_msg = cl.Message(content="", author="RAGentic")
@@ -294,6 +275,9 @@ async def _handle_stream(
         ):
             status = event.get("status")
             node = event.get("node", "")
+            logger.info(
+                f"[DEBUG STREAM] node={node}, status={status}, event_keys={list(event.keys())}"
+            )
 
             if status == "error":
                 err_text = event.get("error", "未知错误")
@@ -318,7 +302,25 @@ async def _handle_stream(
                 active_step.output = _format_step_output(node, state_info)
                 await active_step.__aexit__(None, None, None)
 
-            elif status == "complete" and node == "generate_answer":
+            elif status == "processing" and node == "tools_node":
+                state_info = event.get("state", {})
+                tool_ctx = state_info.get("tool_context", "")
+                if tool_ctx:
+                    tool_step = cl.Step(
+                        name="🔧 工具执行结果",
+                        type="tool",
+                    )
+                    await tool_step.__aenter__()
+                    tool_step.output = tool_ctx[:500] + (
+                        "..." if len(tool_ctx) > 500 else ""
+                    )
+                    await tool_step.__aexit__(None, None, None)
+
+            elif status == "complete" and node in (
+                "generate_answer",
+                "agent_node",
+                "build_context",
+            ):
                 answer = event.get("answer", "")
                 context = event.get("context", "") or ""
 
@@ -326,9 +328,12 @@ async def _handle_stream(
                     await answer_msg.send()
                     answer_started = True
 
-                for i in range(0, len(answer), _STREAM_CHUNK_SIZE):
-                    await answer_msg.stream_token(answer[i : i + _STREAM_CHUNK_SIZE])
-                    await asyncio.sleep(0)
+                if answer:
+                    for i in range(0, len(answer), _STREAM_CHUNK_SIZE):
+                        await answer_msg.stream_token(
+                            answer[i : i + _STREAM_CHUNK_SIZE]
+                        )
+                        await asyncio.sleep(0)
 
                 if context:
                     ctx_preview = (
@@ -357,8 +362,6 @@ async def _handle_stream(
 async def _handle_sync(
     query: str,
     session_id: str,
-    use_kb: bool,
-    use_tool: bool,
     use_memory: bool,
     top_k: int,
     use_sparse: bool,
@@ -367,7 +370,7 @@ async def _handle_sync(
 ):
     """同步处理 - 纯 async"""
     pipeline = await _get_pipeline_and_config(
-        use_kb, use_tool, use_memory, top_k, use_sparse, use_reranker, enable_think
+        use_memory, top_k, use_sparse, use_reranker, enable_think
     )
 
     try:

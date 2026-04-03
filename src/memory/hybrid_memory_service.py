@@ -55,10 +55,18 @@ class HybridMemoryService(MemoryService):
         self._conversation_count = 0
         self._pending_stm_messages: List[Dict[str, str]] = []
 
+        # 加载 MemorySettings（包含 max_memories, memory_ttl_days）
+        from src.configs.memory_settings import MemorySettings
+
+        memory_settings = MemorySettings()
+        self.max_memories = memory_settings.max_memories
+        self.memory_ttl_days = memory_settings.memory_ttl_days
+
         logger.info(
             f"初始化混合记忆服务: user_id={user_id}, "
             f"stm_window={stm_window_size}, ltm_threshold={ltm_persist_threshold}, "
-            f"enable_stm={enable_stm}, enable_ltm={enable_ltm}"
+            f"enable_stm={enable_stm}, enable_ltm={enable_ltm}, "
+            f"max_memories={self.max_memories}, memory_ttl_days={self.memory_ttl_days}"
         )
 
     async def initialize(self) -> None:
@@ -73,6 +81,8 @@ class HybridMemoryService(MemoryService):
             if self.enable_stm:
                 self._stm = ShortTermMemory(window_size=self.stm_window_size)
                 self._stm.set_context(user_id=self.user_id, thread_id=self.user_id)
+                # 4.2: 初始化时尝试从 checkpoint 恢复 STM
+                self._stm.load_from_checkpoint(config={})
                 logger.info("短期记忆初始化完成")
 
             if self.enable_ltm:
@@ -96,6 +106,162 @@ class HybridMemoryService(MemoryService):
         if self._ltm is None:
             raise RuntimeError("长期记忆未启用或未初始化")
         return self._ltm
+
+    def _clear_checkpoint(self) -> None:
+        """清除 STM checkpoint"""
+        if not self.enable_stm or not self._stm:
+            return
+        try:
+            from langgraph.checkpoint.memory import MemorySaver
+
+            checkpointer = MemorySaver()
+            checkpoint_config = {
+                "configurable": {
+                    "thread_id": self._stm._thread_id or "default",
+                    "user_id": self._stm._user_id,
+                }
+            }
+            checkpointer.delete(config=checkpoint_config)
+            logger.debug("STM checkpoint 已清除")
+        except Exception as e:
+            logger.warning(f"清除 checkpoint 失败: {e}")
+
+    async def _cleanup_expired_memories(self, user_id: str) -> int:
+        """删除已过期的 LTM 记忆，返回删除数量"""
+        if not self.enable_ltm:
+            return 0
+
+        all_memories = await self._ensure_ltm().get_history(user_id=user_id, limit=1000)
+        if not all_memories:
+            return 0
+
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=self.memory_ttl_days)
+        deleted_count = 0
+
+        for mem in all_memories:
+            created_at_str = mem.get("created_at")
+            if not created_at_str:
+                continue
+            try:
+                # Mem0 返回的 created_at 可能是 ISO 格式字符串
+                if isinstance(created_at_str, str):
+                    created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                else:
+                    created_at = created_at_str
+                if created_at < cutoff:
+                    mem_id = mem.get("id")
+                    if mem_id:
+                        await self._ensure_ltm().delete(mem_id)
+                        deleted_count += 1
+            except Exception as e:
+                logger.warning(f"解析记忆创建时间失败: {created_at_str}, {e}")
+
+        if deleted_count > 0:
+            logger.info(f"清理了 {deleted_count} 条过期记忆")
+        return deleted_count
+
+    async def _consolidate_memories(self, user_id: str) -> None:
+        """当记忆数量超过 max_memories 时，对最旧的记忆进行摘要整合"""
+        if not self.enable_ltm:
+            return
+
+        all_memories = await self._ensure_ltm().get_history(user_id=user_id, limit=1000)
+        if len(all_memories) <= self.max_memories:
+            return
+
+        # 按创建时间排序，取最旧的 N 条（超出 max_memories 的部分）
+        sorted_memories = sorted(
+            all_memories,
+            key=lambda m: m.get("created_at", ""),
+        )
+        excess_count = len(all_memories) - self.max_memories
+        old_memories = sorted_memories[:excess_count]
+
+        if not old_memories:
+            return
+
+        logger.info(f"触发记忆摘要: {len(old_memories)} 条旧记忆将合并为摘要")
+
+        # 构建摘要文本
+        memory_texts = []
+        for mem in old_memories:
+            text = mem.get("text", "")
+            if text:
+                memory_texts.append(text)
+        if not memory_texts:
+            return
+
+        original_text = "\n---\n".join(memory_texts)
+
+        # 调用 LLM 进行 summarization
+        summary = await self._summarize_memories(original_text)
+
+        # 删除原记忆
+        for mem in old_memories:
+            mem_id = mem.get("id")
+            if mem_id:
+                await self._ensure_ltm().delete(mem_id)
+
+        # 添加摘要记忆
+        await self._ensure_ltm().add(
+            messages=[{"role": "user", "content": summary}],
+            user_id=user_id,
+            metadata={"source": "hybrid_memory_service", "type": "consolidated_summary"},
+            infer=False,
+        )
+        logger.info(f"记忆摘要已添加: {len(old_memories)} 条旧记忆合并为 1 条摘要")
+
+    def _filter_expired_memories(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """从检索结果中过滤 TTL 过期的记忆"""
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=self.memory_ttl_days)
+
+        filtered = []
+        for mem in results:
+            created_at_str = mem.get("created_at")
+            if not created_at_str:
+                # 没有创建时间的保留
+                filtered.append(mem)
+                continue
+            try:
+                if isinstance(created_at_str, str):
+                    created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                else:
+                    created_at = created_at_str
+                if created_at >= cutoff:
+                    filtered.append(mem)
+            except Exception:
+                # 解析失败时保留
+                filtered.append(mem)
+
+        expired_count = len(results) - len(filtered)
+        if expired_count > 0:
+            logger.debug(f"检索时过滤了 {expired_count} 条过期记忆")
+        return filtered
+
+    async def _summarize_memories(self, text: str) -> str:
+        """调用 LLM 对记忆文本进行 summarization"""
+        from src.models.llm import LLMWrapper
+        from src.configs.model_config import LLMConfig
+
+        llm_config = LLMConfig()
+        llm = LLMWrapper(config=llm_config)
+
+        prompt = (
+            "你是一个记忆摘要助手。请将以下多条记忆合并为一条简洁摘要，"
+            "保留关键事实、用户偏好和重要上下文。摘要应该流畅、连贯，不要罗列要点。\n\n"
+            f"原始记忆：\n{text}\n\n"
+            "请生成简洁摘要："
+        )
+
+        messages = [{"role": "user", "content": prompt}]
+        result = await llm.achat(model=llm_config.model, messages=messages)
+        return result if result else text
 
     async def add(
         self,
@@ -135,6 +301,9 @@ class HybridMemoryService(MemoryService):
         result = {"results": [], "stm_count": len(self._pending_stm_messages)}
 
         if self.enable_ltm:
+            # 3.1/3.2: 添加前先清理过期记忆
+            await self._cleanup_expired_memories(user_id)
+
             should_persist = (
                 persist_immediately
                 or len(self._pending_stm_messages) >= self.ltm_persist_threshold
@@ -153,6 +322,16 @@ class HybridMemoryService(MemoryService):
                 ltm_persisted = True
                 self._conversation_count += 1
                 logger.info(f"已刷 {len(result['results'])} 条记忆到 LTM")
+
+                # 2.1: 持久化后检查是否需要摘要整合
+                await self._consolidate_memories(user_id)
+
+                # 4.1: 持久化成功后保存 STM checkpoint
+                if self.enable_stm and self._stm:
+                    self._stm.save_to_checkpoint(config={})
+
+                # 4.3: 清理 checkpoint（成功后删除）
+                self._clear_checkpoint()
 
         result["ltm_persisted"] = ltm_persisted
         return result
@@ -191,6 +370,8 @@ class HybridMemoryService(MemoryService):
             threshold=threshold,
             **kwargs,
         )
+        # 3.3: 过滤 TTL 过期记忆
+        results = self._filter_expired_memories(results)
         return results
 
     def get_stm_messages(self, limit: Optional[int] = None) -> List[Dict[str, str]]:
@@ -289,6 +470,17 @@ class HybridMemoryService(MemoryService):
             self._pending_stm_messages.clear()
             self._conversation_count += 1
             logger.info(f"强制刷写 {count} 条消息到 LTM")
+
+            # 持久化后检查是否需要摘要整合
+            await self._consolidate_memories(user_id)
+
+            # 4.1: 持久化成功后保存 STM checkpoint
+            if self.enable_stm and self._stm:
+                self._stm.save_to_checkpoint(config={})
+
+            # 4.3: 清理 checkpoint
+            self._clear_checkpoint()
+
             return {"results": result.get("results", []), "count": count}
 
         return {"results": [], "count": 0}
@@ -331,6 +523,8 @@ class HybridMemoryService(MemoryService):
             "enable_ltm": self.enable_ltm,
             "stm_window_size": self.stm_window_size,
             "ltm_persist_threshold": self.ltm_persist_threshold,
+            "max_memories": self.max_memories,
+            "memory_ttl_days": self.memory_ttl_days,
             "pending_stm_messages": len(self._pending_stm_messages),
             "conversation_count": self._conversation_count,
             "initialized": self._initialized,

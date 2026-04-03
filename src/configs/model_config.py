@@ -14,10 +14,17 @@ class LLMConfig(BaseModel):
 
     base_url: str = Field("", description="LLM API Base URL，默认从.env 中加载")
     api_key: str = Field("", description="LLM API Key，默认从.env 中加载")
-    provider: str = Field("openai", description="LLM 提供商")
-    model: str = Field("Qwen/Qwen3-32B", description="使用的模型名称")
+    provider: str = Field("openai", description="LLM 提供商: openai/minimax/litellm")
+    model: str = Field("gpt-4o", description="使用的模型名称")
     temperature: float = Field(0.0, ge=0, le=1, description="生成结果随机性")
     max_tokens: int = Field(2000, gt=0, description="最大 tokens 数")
+
+    # 语义缓存配置
+    use_response_cache: bool = Field(False, description="是否启用 LLM 语义缓存")
+    cache_similarity_threshold: float = Field(
+        0.92, ge=0, le=1, description="缓存命中相似度阈值"
+    )
+    cache_ttl_seconds: int = Field(86400, gt=0, description="缓存 TTL（秒），默认 24 小时")
 
 
 class EmbeddingConfig(BaseModel):

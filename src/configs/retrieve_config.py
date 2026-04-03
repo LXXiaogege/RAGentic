@@ -47,6 +47,9 @@ class SearchConfig(BaseModel):
     use_sparse: bool = False
     use_reranker: bool = False
 
+    use_rewrite: bool = Field(False, description="是否启用查询改写")
+    rewrite_mode: str = Field("hyde", description="查询改写模式: hyde / step_back / sub_query")
+
     use_memory: bool = False
     memory_window_size: int = Field(5, ge=1)
 
@@ -66,6 +69,13 @@ class SearchConfig(BaseModel):
 
     user_id: Optional[str] = Field(None, min_length=1, max_length=100)
     session_id: Optional[str] = Field(None, min_length=1, max_length=100)
+
+    max_tool_calls_history: int = Field(
+        100, ge=1, description="tool_calls_history 最大条目数，超出后 FIFO 淘汰"
+    )
+    max_checkpoints: int = Field(
+        1000, ge=1, description="LangGraph MemorySaver 最大 checkpoint 数，超出后 FIFO 淘汰"
+    )
 
 
 # Prompt 构建配置

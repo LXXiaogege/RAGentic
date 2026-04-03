@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 RAGentic is an enterprise-grade RAG (Retrieval-Augmented Generation) Q&A system built on LangGraph. It orchestrates knowledge base retrieval, external tool invocation, conversation memory, and LLM generation in a configurable workflow graph.
 
+**Design Philosophy: Light RAG, Heavy Agent**
+- Knowledge base retrieval is a `kb_search` MCP tool, actively called by Agent when needed
+- Agent drives the workflow, tool calls are determined by LLM
+
 ## Commands
 
 **Package manager**: `uv` (not pip)
@@ -14,14 +18,14 @@ RAGentic is an enterprise-grade RAG (Retrieval-Augmented Generation) Q&A system 
 # Install dependencies
 uv sync
 
-# Run the web app
+# Run the web app (Chainlit)
+PYTHONPATH=. uv run python chainlit_app.py
+
+# Run the web app (Gradio, legacy)
 PYTHONPATH=. uv run python web_app.py
 
 # Run all tests
 PYTHONPATH=. uv run pytest tests/
-
-# Run a single test file
-PYTHONPATH=. uv run python tests/test_pipeline_langgraph.py
 
 # Run a specific test
 PYTHONPATH=. uv run pytest tests/test_pipeline_nodes.py::TestClassName::test_method_name
@@ -37,17 +41,21 @@ PYTHONPATH=. uv run python mcp_server.py
 The core is `src/cores/pipeline_langgraph.py` — `LangGraphQAPipeline` defines a directed graph where nodes are pipeline stages:
 
 ```
-parse_query → transform_query → check_retrieve_knowledge → retrieve_knowledge
-                                                         ↘
-                                                          → check_call_tools → call_tools
-                                                                             ↘
-                                                                              → build_context → generate_answer → update_memory
+parse_query → agent_node → tools_node → build_context → generate_answer → update_memory
+                    ↑
+                    └──(loop if tool_calls)
 ```
 
-Conditional edges (`check_retrieve_knowledge`, `check_call_tools`) skip stages based on config flags. State flows as `QAState` (TypedDict) through all nodes.
+- `parse_query`: Initialize state parameters
+- `agent_node`: LLM with tools, loops until no more tool_calls
+- `tools_node`: Execute tool calls (MCP tools + kb_search)
+- `build_context`: Assemble final context from tool results, KB, memory
+- `generate_answer`: Generate final answer (when not using agent loop)
+- `update_memory`: Persist to hybrid memory (STM + Mem0 LTM)
+- `src/cores/bounded_memory_saver.py`: Bounded memory persistence for long sessions
 
 Public API:
-- `pipeline.ask(query, config?)` → sync dict with `answer`
+- `pipeline.ask(query, config?)` → async dict with `answer`
 - `pipeline.ask_stream(query, config?)` → async generator of event dicts
 - `pipeline.batch_ask(queries)` → list of results
 
@@ -55,19 +63,66 @@ Public API:
 
 All config lives in `src/configs/`. `AppConfig` (in `config.py`) is the root object that loads `.env` via Pydantic. Environment variable convention: `SECTION__FIELD` maps to `config.section.field` (e.g., `LLM__API_KEY` → `config.llm.api_key`).
 
+Config files:
+- `config.py`: Root `AppConfig` class
+- `model_config.py`: LLM and embedding model config
+- `retrieve_config.py`: Retrieval/search config
+- `memory_settings.py`: Memory behavior settings
+- `logger_config.py`: Logging configuration
+
 Key config flags in `SearchConfig` (via `config.retrieve`):
 - `use_kb` / `use_tool` / `use_memory` — enable retrieval stages
 - `use_sparse` / `use_reranker` — retrieval quality enhancements
 - `use_rewrite` / `rewrite_mode` — query transformation (`hyde`, `step_back`, `sub_query`)
 
-### Models
+### LLM Models
 
-- `src/models/llm.py`: `OpenAILLM` (raw API) and `LLMWrapper` (LangChain-compatible). Both wrap OpenAI-compatible endpoints and apply Langfuse tracing decorators.
-- `src/models/embedding.py`: `TextEmbedding` with optional RedisVL caching. Batch-aware with cache hit/miss detection.
+`src/models/llm.py`: `LLMWrapper` supports multiple providers via **litellm** (recommended) or direct OpenAI SDK:
 
-### Vector Database
+| Provider | Model Format | Notes |
+|----------|-------------|-------|
+| `litellm` | `minimax/minimaxi` | 推荐，支持 100+ LLM，统一接口 |
+| `openai` | `gpt-4o` | 标准 OpenAI 兼容 |
+| `minimax` | MiniMax-M2.7 | 兼容 OpenAI API |
 
-`src/db_services/milvus/` manages Milvus. Supports two modes via `MilvusConfig.milvus_mode`:
+**litellm 优势**：统一接口、内置 tool calling、自动处理 provider 差异、重试/限流。
+
+- `src/models/llm.py`: `LLMWrapper` + `OpenAILLM`
+- `src/models/llm_litellm.py`: `LiteLLMWrapper` (litellm 封装，兼容 `LLMWrapper` 接口)
+- `src/models/llm_response_cache.py`: LLM 语义缓存，基于 RedisVL 向量相似度匹配
+- `src/models/embedding.py`: `TextEmbedding` with optional RedisVL caching
+
+#### LLM Response Cache (Semantic Cache)
+
+`src/models/llm_response_cache.py`: 基于 RedisVL 向量相似度的 LLM 响应语义缓存。
+
+- 缓存 key：query 文本的 SHA256 hash
+- 存储：Redis Hash（`llm_response:` 前缀存响应）+ EmbeddingsCache（存 embedding 用于相似度搜索）
+- 命中条件：余弦相似度 > 阈值（默认 0.92）
+- TTL：默认 24 小时（可配置）
+
+启用方式：
+```env
+LLM__USE_RESPONSE_CACHE=true
+LLM__CACHE_SIMILARITY_THRESHOLD=0.92
+LLM__CACHE_TTL_SECONDS=86400
+```
+
+**不缓存的请求类型**：stream=True、return_raw=True、带 tools 参数的请求（工具调用结果不适合复用）
+
+### Vector Database (db_services)
+
+`src/db_services/` manages database access with a factory pattern:
+- `src/db_services/base.py`: Base interface
+- `src/db_services/factory.py`: Database service factory
+- `src/db_services/milvus/`: Milvus implementation
+  - `connection.py` / `connection_manager.py`: Connection management
+  - `collection.py` / `collection_manager.py`: Collection management
+  - `data.py` / `data_service.py`: Data operations
+  - `retrieval.py`: Retrieval operations
+  - `store.py` / `database_manager.py`: Storage management
+
+Supports two modes via `MilvusConfig.milvus_mode`:
 - `"local"` — SQLite-based milvus-lite (default, no server needed)
 - `"remote"` — connects to a Milvus server
 
@@ -75,32 +130,63 @@ Retrieval supports dense (semantic), sparse (BM25), and hybrid search with optio
 
 ### Tools & MCP
 
-`src/agent/tools.py` contains `WebSpider` for web crawling. External tools (weather, web search) are invoked via the MCP protocol — `src/mcp/mcp_client.py` handles tool calls; `src/mcp/server/` has server implementations.
+External tools (weather, web search, kb_search) are invoked via the MCP protocol:
+- `src/mcp/mcp_client.py`: MCP client for tool calls
+- `src/mcp/server/`: MCP server implementations (`kb_tools.py`, `weather.py`, `web_crawl.py`)
+- `src/agent/tools.py`: `WebSpider` for web crawling
 
-### Memory
+### Memory (Hybrid)
 
 Two layers:
-- **Short-term**: LangGraph message history within a session (via `QAState.messages`)
-- **Long-term**: Mem0 integration (`src/memory/mem0_manager.py`) for cross-session memory
+- **Short-term (STM)**: LangGraph message history within a session (via `QAState.messages`)
+- **Long-term (LTM)**: Mem0 integration (`src/memory/mem0_manager.py`) + Milvus vector storage
+
+Core services:
+- `src/memory/hybrid_memory_service.py`: Unified memory interface (primary)
+- `src/memory/base.py`: Abstract base class
+- `src/memory/short_term_memory.py`: STM implementation
+- `src/memory/long_term_memory.py`: LTM implementation
+- `src/memory/mem0_manager.py`: Mem0 integration
+- `src/cores/bounded_memory_saver.py`: Bounded memory persistence
+
+### Skills System
+
+`src/skills/skill_manager.py` and `skills/` directory manage extensible skills:
+- Skills are injected into system prompts as additional context
+- Directory: `skills/` contains skill definition files
 
 ### Web App
 
-`web_app.py` is a Gradio 5 app. It wraps `LangGraphQAPipeline`, applies `src/utils/security.py` input validation (XSS, SQL injection, path traversal), and manages per-session UUIDs for Langfuse tracing.
+- `chainlit_app.py`: Chainlit 5 app (primary, recommended)
+- `web_app.py`: Gradio 5 app (legacy)
+
+Security: `src/utils/security.py` handles input validation (XSS, SQL injection, path traversal).
 
 ## Key Conventions
 
-- **Async**: Embedding and tool calls are async; the pipeline exposes both sync (`ask`) and async streaming (`ask_stream`) interfaces.
-- **Observability**: Critical functions use `@langfuse_context.observe()` decorators. Do not remove these when modifying pipeline nodes.
-- **Config injection**: Pipeline components receive `AppConfig` at init time — don't read env vars directly in pipeline/model code.
-- **PYTHONPATH**: Must be set to `.` when running scripts directly (imports use `src.` prefix).
+- **Async**: Embedding, tool calls, and pipeline are async; exposes both sync and async streaming interfaces
+- **Observability**: Critical functions use `@langfuse_context.observe()` decorators
+- **Config injection**: Pipeline components receive `AppConfig` at init time — don't read env vars directly
+- **PYTHONPATH**: Must be set to `.` when running scripts directly (imports use `src.` prefix)
+- **Proactive documentation**: After implementing features, immediately update CLAUDE.md and relevant docs — do not wait to be asked
 
 ## Environment Setup
 
-Copy `.env.example` to `.env` and fill in at minimum:
-- `LLM__API_KEY` and `LLM__BASE_URL` (OpenAI-compatible LLM)
-- `EMBEDDING__API_KEY` and `EMBEDDING__BASE_URL`
+Copy `.env.example` to `.env` and configure:
 
-Optional services: Langfuse (observability), Redis (embedding cache), remote Milvus (production vector DB).
+```env
+# LLM Provider (litellm 推荐，支持 100+ 模型)
+LLM__PROVIDER=litellm
+LLM__MODEL=minimax/minimaxi
+LLM__BASE_URL=https://api.minimax.chat/v1
+LLM__API_KEY=your_api_key
+
+# Embedding
+EMBEDDING__BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING__API_KEY=your_embedding_key
+```
+
+Optional: Langfuse (observability), Redis (embedding cache), remote Milvus (production vector DB).
 
 ## Docker
 
@@ -110,4 +196,4 @@ docker-compose --profile with-redis up -d                     # + Redis cache
 docker-compose --profile with-redis --profile with-milvus up -d  # + production Milvus
 ```
 
-App is available at `http://localhost:7860`.
+Chainlit app available at `http://localhost:7860`.

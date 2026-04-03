@@ -56,4 +56,7 @@ def setup_logger(name: str, level=logging.INFO):
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
 
+    # 禁用日志传播，避免重复输出
+    logger.propagate = False
+
     return logger

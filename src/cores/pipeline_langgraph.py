@@ -22,8 +22,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langfuse import Langfuse
 from langfuse.callback import CallbackHandler
 from langfuse.decorators import langfuse_context
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph, add_messages
+
+from src.cores.bounded_memory_saver import BoundedMemorySaver
 from pydantic import BaseModel
 
 from src.configs.config import AppConfig
@@ -77,6 +78,10 @@ class QAState(BaseModel):
 
     agent_iteration: int = 0
     tool_calls_history: List[Dict[str, Any]] = []
+
+    cache_hit: Optional[bool] = None
+    hyde_vector: Optional[List[float]] = None
+    stream: bool = False
 
 
 def build_prompt_messages(
@@ -160,7 +165,9 @@ class LangGraphQAPipeline:
             search_config=self.config.retrieve,
         )
 
-        self.checkpointer = MemorySaver()
+        self.checkpointer = BoundedMemorySaver(
+            max_checkpoints=self.config.retrieve.max_checkpoints,
+        )
 
         self.langfuse_client = None
         self.langfuse_handler = None
@@ -280,6 +287,7 @@ class LangGraphQAPipeline:
         workflow.add_edge("update_memory", END)
         workflow.add_edge("handle_error", END)
 
+    @langfuse_context.observe(name="pipeline._parse_query")
     @timing_decorator
     async def _parse_query(self, state: QAState) -> QAState:
         """解析查询，设置默认参数"""
@@ -292,24 +300,64 @@ class LangGraphQAPipeline:
             if state.use_memory is None:
                 state.use_memory = self.config.retrieve.use_memory
             state.error = None
+
+            # 查询改写
+            if self.config.retrieve.use_rewrite and self.query_transformer:
+                mode = self.config.retrieve.rewrite_mode
+                self.logger.info(f"启用查询改写，模式：{mode}")
+                try:
+                    if mode == "hyde":
+                        # HyDE 模式：生成假设性答案向量，存入 state.hyde_vector
+                        hyde_vector = await self.query_transformer.generate_hyde_vector(
+                            state.original_query,
+                            num_hypo=self.config.retrieve.num_hypo,
+                        )
+                        if hyde_vector:
+                            state.transformed_query = state.original_query
+                            state.hyde_vector = hyde_vector
+                            self.logger.info("HyDE 向量生成成功")
+                        else:
+                            state.transformed_query = None
+                            self.logger.warning("HyDE 向量生成失败，回退到原始查询")
+                    else:
+                        # step_back / sub_query 模式：直接获取变换后的文本
+                        rewritten = self.query_transformer.transform_query(
+                            state.original_query, mode=mode
+                        )
+                        state.transformed_query = rewritten
+                        self.logger.info(f"查询改写成功：{rewritten[:50]}...")
+                except Exception as e:
+                    self.logger.warning(f"查询改写失败：{e}，使用原始查询")
+                    state.transformed_query = None
+
             return state
         except Exception as e:
             self.logger.exception(f"解析查询失败：{e}")
             state.error = f"解析查询失败：{str(e)}"
             return state
 
+    @langfuse_context.observe(name="pipeline._agent_node")
     @timing_decorator
     async def _agent_node(self, state: QAState) -> QAState:
         """Agent 节点：LLM with tools，循环调用直到无 tool_calls"""
         try:
             self.logger.info(
-                f"Agent节点迭代 {state.agent_iteration}，"
-                f"当前 tool_calls_history 长度: {len(state.tool_calls_history)}，"
-                f"messages 数量: {len(state.messages)}"
+                f"[AGENT_NODE] >>> iteration={state.agent_iteration}, "
+                f"tool_calls_history_len={len(state.tool_calls_history)}, "
+                f"messages_count={len(state.messages)}, "
+                f"use_tool={self.config.retrieve.use_tool}"
             )
+
+            for i, msg in enumerate(state.messages):
+                self.logger.info(
+                    f"[AGENT_NODE]   state.messages[{i}] {type(msg).__name__}: content={str(msg.content)[:80] if msg.content else ''}..., tool_calls={getattr(msg, 'tool_calls', None)}"
+                )
 
             if self.config.retrieve.use_tool:
                 openai_tools = await self._get_openai_tools()
+                self.logger.info(
+                    f"[AGENT_NODE]   openai_tools count: {len(openai_tools)}"
+                )
             else:
                 openai_tools = []
 
@@ -328,32 +376,112 @@ class LangGraphQAPipeline:
                     use_memory=self.config.retrieve.use_memory,
                     memory_limit=self.config.retrieve.memory_window_size,
                 )
+                self.logger.info(
+                    f"[AGENT_NODE]   built new messages from scratch, count={len(messages)}"
+                )
             else:
                 messages = list(state.messages)
+                self.logger.info(
+                    f"[AGENT_NODE]   reusing state.messages, count={len(messages)}"
+                )
+                for i, msg in enumerate(messages):
+                    tc = getattr(msg, "tool_calls", None)
+                    self.logger.info(
+                        f"[AGENT_NODE]   msg[{i}] {type(msg).__name__}: content={str(msg.content)[:100] if msg.content else ''}..., tool_calls={tc}, tc_type={type(tc)}"
+                    )
+                    if tc:
+                        for j, t in enumerate(tc):
+                            self.logger.info(
+                                f"[AGENT_NODE]     tc[{j}]: type={type(t)}, value={t}"
+                            )
 
             extra_body = self.config.retrieve.extra_body
             call_kwargs = dict(
                 messages=messages,
                 return_raw=True,
                 extra_body=extra_body,
+                stream=state.stream,
             )
             if openai_tools:
                 call_kwargs["tools"] = openai_tools
                 call_kwargs["tool_choice"] = "auto"
 
-            response = self.llm_caller.chat(**call_kwargs)
-            raw_message = response.choices[0].message
+            self.logger.info(
+                f"[AGENT_NODE]   calling LLM with {len(messages)} messages, tools={bool(openai_tools)}, stream={state.stream}"
+            )
+            response = await self.llm_caller.achat(**call_kwargs)
+            state.cache_hit = self.llm_caller._last_cache_hit
+
+            if state.stream:
+                # 流式模式：迭代 chunks 收集完整响应
+                content_chunks = []
+                tool_calls_chunks = []
+                is_first_chunk = True
+                async for chunk in response:
+                    if hasattr(chunk, "choices") and chunk.choices:
+                        delta = chunk.choices[0].delta
+                        if delta:
+                            if hasattr(delta, "content") and delta.content:
+                                content_chunks.append(delta.content)
+                            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                                tool_calls_chunks.append(delta.tool_calls)
+                        is_first_chunk = False
+                full_content = "".join(content_chunks)
+                raw_message = type("RawMessage", (), {
+                    "content": full_content,
+                    "tool_calls": tool_calls_chunks[0] if tool_calls_chunks else None
+                })()
+            else:
+                # 非流式模式
+                raw_message = response.choices[0].message
+            self.logger.info(
+                f"[AGENT_NODE]   LLM response: content={str(raw_message.content)[:200] if raw_message.content else 'None'}, tool_calls={raw_message.tool_calls}"
+            )
 
             if openai_tools and raw_message.tool_calls:
-                lc_tool_calls = [
-                    {
-                        "id": tc.id,
-                        "name": tc.function.name,
-                        "args": __import__("json").loads(tc.function.arguments),
-                        "type": "tool_call",
-                    }
-                    for tc in raw_message.tool_calls
-                ]
+                lc_tool_calls = []
+                self.logger.info(
+                    f"[AGENT_NODE]   raw tool_calls count: {len(raw_message.tool_calls)}"
+                )
+                for tc in raw_message.tool_calls:
+                    tc_type = type(tc).__name__
+                    tc_id = getattr(tc, "id", "N/A")
+                    tc_func = getattr(tc, "function", None)
+                    func_name = getattr(tc_func, "name", "N/A") if tc_func else "N/A"
+                    func_args_raw = (
+                        getattr(tc_func, "arguments", None) if tc_func else "N/A"
+                    )
+                    self.logger.info(
+                        f"[AGENT_NODE]   tc: type={tc_type}, id={tc_id}, func_name={func_name}, func_args_raw type={type(func_args_raw).__name__}, func_args_raw={func_args_raw}"
+                    )
+                    self.logger.info(
+                        f"[AGENT_NODE]   tc: type={tc_type}, id={tc_id}, function.name={func_name}, function.arguments={func_args_raw}"
+                    )
+                    try:
+                        if func_args_raw is None:
+                            args = {}
+                        elif isinstance(func_args_raw, dict):
+                            args = func_args_raw
+                        else:
+                            args = __import__("json").loads(func_args_raw)
+                        if not isinstance(args, dict):
+                            args = {"raw": str(args)}
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[AGENT_NODE]   json parse error: {e}, raw_args: {func_args_raw}"
+                        )
+                        args = {"raw": str(func_args_raw)}
+                    lc_tool_calls.append(
+                        {
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "args": args,
+                            "type": "tool_call",
+                        }
+                    )
+                    self.logger.info(
+                        f"[AGENT_NODE]   appended tc: name={tc.function.name}, args type={type(args)}"
+                    )
                 ai_msg = AIMessage(
                     content=raw_message.content or "",
                     tool_calls=lc_tool_calls,
@@ -361,20 +489,31 @@ class LangGraphQAPipeline:
                 state.messages += [ai_msg]
                 state.agent_iteration += 1
                 self.logger.info(
-                    f"Agent决定调用工具: {[tc['name'] for tc in lc_tool_calls]}"
+                    f"[AGENT_NODE]   <<< HAS TOOL_CALLS: {[tc['name'] for tc in lc_tool_calls]}, "
+                    f"args={[tc['args'] for tc in lc_tool_calls]}"
                 )
             else:
                 answer_content = raw_message.content or ""
                 ai_msg = AIMessage(content=answer_content)
                 state.messages += [ai_msg]
                 state.agent_iteration += 1
+                self.logger.info(
+                    f"[AGENT_NODE]   <<< NO TOOL_CALLS, answer={str(answer_content)[:200]}..."
+                )
                 if state.tool_calls_history:
                     tool_results = "\n".join(
                         f"[{r['tool']}]: {r['result']}"
                         for r in state.tool_calls_history
                     )
                     state.tool_context = f"【工具返回内容】\n{tool_results}"
-                self.logger.info("Agent生成最终答案")
+                    self.logger.info(
+                        f"[AGENT_NODE]   <<< SET tool_context from tool_calls_history, len={len(tool_results)}"
+                    )
+                else:
+                    self.logger.info(
+                        "[AGENT_NODE]   <<< NO tool_calls_history, tool_context NOT set"
+                    )
+                self.logger.info("[AGENT_NODE]   <<< Agent生成最终答案")
 
             return state
 
@@ -382,6 +521,17 @@ class LangGraphQAPipeline:
             self.logger.exception(f"Agent节点执行失败：{e}")
             state.error = f"Agent节点执行失败：{str(e)}"
             return state
+        finally:
+            # 更新 span metadata
+            if hasattr(langfuse_context, "update_current_span"):
+                langfuse_context.update_current_span(
+                    metadata={
+                        "agent_iteration": state.agent_iteration,
+                        "tool_calls_count": len(getattr(state, "tool_calls_history", [])),
+                        "cache_hit": getattr(state, "cache_hit", False),
+                        "use_tools": self.config.retrieve.use_tool,
+                    }
+                )
 
     async def _get_openai_tools(self) -> list:
         """获取 OpenAI 格式的工具列表（复用 MCP 连接）"""
@@ -396,10 +546,15 @@ class LangGraphQAPipeline:
             self.logger.warning(f"获取 MCP 工具列表失败: {e}")
             return []
 
+    @langfuse_context.observe(name="pipeline._tools_node")
     @timing_decorator
     async def _tools_node(self, state: QAState) -> QAState:
         """工具节点：执行 AIMessage 中的 tool_calls - 纯 async"""
         try:
+            self.logger.info(
+                f"[TOOLS_NODE] >>> messages_count={len(state.messages)}, tool_calls_history_len={len(state.tool_calls_history)}"
+            )
+
             last_ai = next(
                 (
                     m
@@ -409,37 +564,84 @@ class LangGraphQAPipeline:
                 None,
             )
             if not last_ai:
-                self.logger.warning("tools_node: 未找到待执行的 tool_calls")
+                self.logger.warning("[TOOLS_NODE] 未找到待执行的 tool_calls")
                 return state
 
             tool_calls = last_ai.tool_calls
-            self.logger.info(f"执行 {len(tool_calls)} 个工具调用")
+            if not isinstance(tool_calls, list):
+                self.logger.error(
+                    f"[TOOLS_NODE] tool_calls is not a list! type={type(tool_calls)}, value={tool_calls}"
+                )
+                state.error = (
+                    f"tool_calls format error: expected list, got {type(tool_calls)}"
+                )
+                return state
+            self.logger.info(
+                f"[TOOLS_NODE] 执行 {len(tool_calls)} 个工具调用: {[tc['name'] for tc in tool_calls]}"
+            )
+            for tc in tool_calls:
+                self.logger.info(
+                    f"[TOOLS_NODE]   tool_call: {tc['name']}, id={tc['id']}, args={tc['args']}"
+                )
 
-            kb_tool_calls = [tc for tc in tool_calls if tc["name"] == "kb_search"]
-            mcp_tool_calls = [tc for tc in tool_calls if tc["name"] != "kb_search"]
+            kb_tool_calls = []
+            mcp_tool_calls = []
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    self.logger.error(
+                        f"[TOOLS_NODE] tool_call is not a dict: type={type(tc)}, value={tc}"
+                    )
+                    continue
+                if tc.get("name") == "kb_search":
+                    kb_tool_calls.append(tc)
+                else:
+                    mcp_tool_calls.append(tc)
+            self.logger.info(
+                f"[TOOLS_NODE]   kb_tool_calls={len(kb_tool_calls)}, mcp_tool_calls={len(mcp_tool_calls)}"
+            )
 
             results_map: Dict[str, str] = {}
 
             if kb_tool_calls:
-                kb_tasks = [
-                    self.kb_tools.kb_search(
-                        query=tc["args"].get("query", ""),
-                        top_k=tc["args"].get("top_k", 3),
+                self.logger.info(
+                    f"[TOOLS_NODE]   准备执行 KB search，共 {len(kb_tool_calls)} 个"
+                )
+                kb_tasks = []
+                for tc in kb_tool_calls:
+                    args = (
+                        tc.get("args", {}) if isinstance(tc.get("args"), dict) else {}
                     )
-                    for tc in kb_tool_calls
-                ]
+                    query = args.get("query", "") if isinstance(args, dict) else ""
+                    top_k = args.get("top_k", 3) if isinstance(args, dict) else 3
+                    kb_tasks.append(self.kb_tools.kb_search(
+                        query=query,
+                        top_k=top_k,
+                        hyde_vector=getattr(state, "hyde_vector", None),
+                    ))
                 kb_results = await asyncio.gather(*kb_tasks)
                 for tc, result in zip(kb_tool_calls, kb_results):
                     results_map[tc["id"]] = result
+                    args = (
+                        tc.get("args", {}) if isinstance(tc.get("args"), dict) else {}
+                    )
+                    query = (
+                        args.get("query", "") if isinstance(args, dict) else str(args)
+                    )
                     self.logger.info(
-                        f"KB search [{tc['args'].get('query', '')}] 返回: {result[:200] if result else '(空)'}"
+                        f"[TOOLS_NODE]   KB [{query}] => {result[:100] if result else '(空)'}..."
                     )
 
             if mcp_tool_calls:
+                self.logger.info(
+                    f"[TOOLS_NODE]   准备执行 MCP 工具，共 {len(mcp_tool_calls)} 个"
+                )
                 client = await self._ensure_mcp_client()
                 mcp_results = await client.execute_tool_calls(mcp_tool_calls)
                 for tc, result in zip(mcp_tool_calls, mcp_results):
                     results_map[tc["id"]] = result
+                    self.logger.info(
+                        f"[TOOLS_NODE]   MCP [{tc['name']}] => {result[:100] if result else '(空)'}..."
+                    )
 
             ordered_results = [results_map[tc["id"]] for tc in tool_calls]
 
@@ -448,27 +650,57 @@ class LangGraphQAPipeline:
                 for tc, result in zip(tool_calls, ordered_results)
             ]
             state.messages += tool_messages
+            self.logger.info(
+                f"[TOOLS_NODE]   添加 {len(tool_messages)} 个 ToolMessage 到 messages"
+            )
 
             history = list(state.tool_calls_history)
             for tc, result in zip(tool_calls, ordered_results):
                 history.append(
                     {"tool": tc["name"], "args": tc["args"], "result": result}
                 )
-                self.logger.info(
-                    f"工具 [{tc['name']}] 结果: {result[:200] if result else '(空)'}"
+            # Enforce max_tool_calls_history limit with FIFO eviction
+            max_history = self.config.retrieve.max_tool_calls_history
+            if len(history) > max_history:
+                evicted = len(history) - max_history
+                history = history[-max_history:]
+                self.logger.debug(
+                    f"[TOOLS_NODE]   tool_calls_history truncated, evicted {evicted} oldest entries, "
+                    f"remaining {len(history)}"
                 )
             state.tool_calls_history = history
-
             self.logger.info(
-                f"工具调用完成，共 {len(results_map)} 条结果，tool_calls_history 长度: {len(history)}"
+                f"[TOOLS_NODE]   tool_calls_history 更新后长度: {len(history)}"
             )
+
+            if history:
+                tool_results = "\n".join(
+                    f"[{r['tool']}]: {r['result']}" for r in history
+                )
+                state.tool_context = f"【工具返回内容】\n{tool_results}"
+                self.logger.info(
+                    f"[TOOLS_NODE]   <<< SET tool_context, len={len(tool_results)}"
+                )
+            else:
+                self.logger.info("[TOOLS_NODE]   <<< NO history, tool_context NOT set")
+
             return state
 
         except Exception as e:
             self.logger.exception(f"工具节点执行失败：{e}")
             state.error = f"工具节点执行失败：{str(e)}"
             return state
+        finally:
+            if hasattr(langfuse_context, "update_current_span"):
+                tool_history = getattr(state, "tool_calls_history", []) or []
+                langfuse_context.update_current_span(
+                    metadata={
+                        "tool_calls_count": len(tool_history),
+                        "tools_executed": [t["tool"] for t in tool_history] if tool_history else [],
+                    }
+                )
 
+    @langfuse_context.observe(name="pipeline._generate_answer")
     @timing_decorator
     async def _generate_answer(self, state: QAState) -> QAState:
         """生成答案（use_tool=False 时的纯 LLM 生成路径）"""
@@ -488,7 +720,20 @@ class LangGraphQAPipeline:
                 memory_limit=self.config.retrieve.memory_window_size,
             )
 
-            answer = self.llm_caller.chat(messages=messages)
+            response = await self.llm_caller.achat(messages=messages, stream=state.stream)
+            state.cache_hit = self.llm_caller._last_cache_hit
+
+            if state.stream:
+                # 流式模式：迭代 chunks 收集完整响应
+                content_chunks = []
+                async for chunk in response:
+                    if hasattr(chunk, "choices") and chunk.choices:
+                        delta = chunk.choices[0].delta
+                        if delta and hasattr(delta, "content") and delta.content:
+                            content_chunks.append(delta.content)
+                answer = "".join(content_chunks)
+            else:
+                answer = response
 
             if not hasattr(state, "messages") or state.messages is None:
                 state.messages = []
@@ -504,6 +749,11 @@ class LangGraphQAPipeline:
             self.logger.exception(f"生成答案失败：{e}")
             state.error = f"生成答案失败：{str(e)}"
             return state
+        finally:
+            if hasattr(langfuse_context, "update_current_span"):
+                langfuse_context.update_current_span(
+                    metadata={"cache_hit": getattr(state, "cache_hit", False)}
+                )
 
     async def _ensure_memory_initialized(self) -> None:
         """确保记忆服务已初始化（async，线程安全）"""
@@ -535,33 +785,47 @@ class LangGraphQAPipeline:
         except Exception as e:
             self.logger.warning(f"记忆服务初始化失败: {e}，将使用简单记忆模式")
 
+    @langfuse_context.observe(name="pipeline._build_context")
     @timing_decorator
     async def _build_context(self, state: QAState) -> QAState:
         """构建最终上下文 - 纯 async"""
         try:
-            self.logger.info("构建最终上下文")
+            self.logger.info(
+                f"[BUILD_CONTEXT] >>> agent_iteration={state.agent_iteration}, tool_context={state.tool_context[:100] if state.tool_context else None}..., kb_context={state.kb_context[:100] if state.kb_context else None}..."
+            )
 
             context_parts = []
 
             if state.tool_context:
                 context_parts.append(state.tool_context)
+                self.logger.info(
+                    f"[BUILD_CONTEXT]   added tool_context, len={len(state.tool_context)}"
+                )
 
             if state.kb_context:
                 context_parts.append(state.kb_context)
-            elif state.agent_iteration == 0 and self.config.retrieve.use_kb:
+                self.logger.info(
+                    f"[BUILD_CONTEXT]   added kb_context, len={len(state.kb_context)}"
+                )
+            elif self.config.retrieve.use_kb:
                 query = state.transformed_query or state.original_query
+                self.logger.info(
+                    f"[BUILD_CONTEXT]   use_kb=True, kb_context is empty, searching kb with query={query}"
+                )
                 try:
                     kb_results = await self.kb_tools.kb_search(
-                        query, top_k=self.config.retrieve.top_k
+                        query,
+                        top_k=self.config.retrieve.top_k,
+                        hyde_vector=getattr(state, "hyde_vector", None),
                     )
                     if kb_results:
                         state.kb_context = kb_results
                         context_parts.append(kb_results)
                         self.logger.info(
-                            f"主动检索知识库返回: {kb_results[:200] if kb_results else '(空)'}..."
+                            f"[BUILD_CONTEXT]   kb search returned {len(kb_results)} chars"
                         )
                 except Exception as e:
-                    self.logger.warning(f"知识库检索失败: {e}")
+                    self.logger.warning(f"[BUILD_CONTEXT]   kb search failed: {e}")
 
             if self.config.retrieve.use_memory and self._memory_settings.enable_ltm:
                 await self._ensure_memory_initialized()
@@ -593,6 +857,15 @@ class LangGraphQAPipeline:
             self.logger.exception(f"构建上下文失败：{e}")
             state.error = f"构建上下文失败：{str(e)}"
             return state
+        finally:
+            if hasattr(langfuse_context, "update_current_span"):
+                langfuse_context.update_current_span(
+                    metadata={
+                        "has_kb_context": bool(getattr(state, "kb_context", None)),
+                        "kb_context_length": len(getattr(state, "kb_context", "") or ""),
+                        "has_memory_context": bool(getattr(state, "tool_context", None)),
+                    }
+                )
 
     @timing_decorator
     async def _update_memory(self, state: QAState) -> QAState:
@@ -650,50 +923,77 @@ class LangGraphQAPipeline:
 
     def _should_call_tools(self, state: QAState) -> str:
         """判断是否需要调用工具"""
+        self.logger.info(
+            f"[SHOULD_CALL_TOOLS] >>> use_tool={self.config.retrieve.use_tool}, use_kb={self.config.retrieve.use_kb}, error={state.error}"
+        )
         if state.error:
+            self.logger.info("[SHOULD_CALL_TOOLS] <<< returning 'error'")
             return "error"
 
         if self.config.retrieve.use_tool:
+            self.logger.info("[SHOULD_CALL_TOOLS] <<< returning 'call_agent'")
             return "call_agent"
         elif self.config.retrieve.use_kb:
+            self.logger.info("[SHOULD_CALL_TOOLS] <<< returning 'skip_tools' (use_kb)")
             return "skip_tools"
         else:
+            self.logger.info("[SHOULD_CALL_TOOLS] <<< returning 'skip_tools' (else)")
             return "skip_tools"
 
     def _should_continue_agent_loop(self, state: QAState) -> str:
         """判断 agent loop 是否继续"""
+        self.logger.info(
+            f"[LOOP_CHECK] >>> agent_iteration={state.agent_iteration}, max={self.config.retrieve.max_agent_iterations}, error={state.error}"
+        )
+
         if state.error:
+            self.logger.info("[LOOP_CHECK] <<< returning 'error'")
             return "error"
 
         if state.agent_iteration >= self.config.retrieve.max_agent_iterations:
             self.logger.warning(
-                f"Agent达到最大迭代次数 {self.config.retrieve.max_agent_iterations}，强制结束"
+                "[LOOP_CHECK] <<< MAX ITERATIONS REACHED, returning 'done'"
             )
             return "done"
 
-        last_ai = next(
-            (m for m in reversed(state.messages) if isinstance(m, AIMessage)),
-            None,
-        )
+        last_ai = None
+        for m in reversed(state.messages):
+            self.logger.info(f"[LOOP_CHECK] checking msg type={type(m).__name__}")
+            if isinstance(m, AIMessage):
+                last_ai = m
+                break
+        if last_ai is None:
+            self.logger.info("[LOOP_CHECK] No AIMessage found")
+            return "done"
+        has_tc = getattr(last_ai, "tool_calls", None)
         self.logger.info(
-            f"_should_continue_agent_loop: messages={len(state.messages)}, "
-            f"last_ai={type(last_ai).__name__ if last_ai else None}, "
-            f"last_ai.tool_calls={getattr(last_ai, 'tool_calls', None)}"
+            f"[LOOP_CHECK] last_ai type={type(last_ai).__name__}, has_tc type={type(has_tc).__name__}, has_tc={has_tc}"
         )
-        if last_ai and getattr(last_ai, "tool_calls", None):
+        if last_ai and has_tc and isinstance(has_tc, list) and len(has_tc) > 0:
+            self.logger.info(
+                "[LOOP_CHECK] <<< HAS TOOL_CALLS, returning 'has_tool_calls'"
+            )
             return "has_tool_calls"
+        self.logger.info("[LOOP_CHECK] <<< NO TOOL_CALLS, returning 'done'")
         return "done"
 
     def _should_generate_answer(self, state: QAState) -> str:
         """判断 build_context 后是否需要 LLM 生成答案"""
+        self.logger.info(
+            f"[GEN_ANSWER_CHECK] >>> agent_iteration={state.agent_iteration}, error={state.error}, use_memory={self.config.retrieve.use_memory}"
+        )
         if state.error:
+            self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'error'")
             return "error"
 
         if state.agent_iteration > 0:
             if self.config.retrieve.use_memory:
+                self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'skip_generate'")
                 return "skip_generate"
+            self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'finish'")
             return "finish"
 
+        self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'generate_answer'")
         return "generate_answer"
 
     def _should_update_memory(self, state: QAState) -> str:
@@ -755,7 +1055,7 @@ class LangGraphQAPipeline:
 
             answer = ai_messages[-1] if ai_messages else "无法生成答案"
 
-            return {
+            ret = {
                 "question": query,
                 "answer": answer,
                 "messages": result.get("messages", existing_messages),
@@ -765,7 +1065,19 @@ class LangGraphQAPipeline:
                 "tool_context": result.get("tool_context", ""),
                 "tool_calls_history": result.get("tool_calls_history", []),
                 "agent_iterations": result.get("agent_iteration", 0),
+                "cache_hit": result.get("cache_hit", False),
             }
+
+            # trace_url 仅在 debug=True 且 Langfuse 启用时返回
+            if kwargs.get("debug") and self.langfuse_client:
+                if hasattr(langfuse_context, "get_trace_url"):
+                    ret["trace_url"] = langfuse_context.get_trace_url()
+                elif hasattr(langfuse_context, "get_trace_id"):
+                    trace_id = langfuse_context.get_trace_id()
+                    if trace_id and self.langfuse_client.host:
+                        ret["trace_url"] = f"{self.langfuse_client.host}/project/1/traces/{trace_id}"
+
+            return ret
 
         except Exception as e:
             self.logger.error(f"问答处理失败: {e}")
@@ -778,7 +1090,7 @@ class LangGraphQAPipeline:
     async def ask_stream(
         self, query: str, **kwargs
     ) -> Generator[Dict[str, Any], None, None]:
-        """流式问答接口 - 纯 async"""
+        """流式问答接口 - 纯 async，支持 token 级流式输出"""
 
         config = RunnableConfig(
             configurable={
@@ -792,57 +1104,78 @@ class LangGraphQAPipeline:
         initial_state_object = QAState(
             original_query=query,
             messages=[],
+            stream=True,
         )
 
+        current_answer = []
+        current_node = None
+
         try:
-            async for event in self.graph.astream(initial_state_object, config):
+            async for event in self.graph.astream_events(initial_state_object, config):
                 if not event:
                     continue
-                node_name = list(event.keys())[0]
-                node_state = event[node_name]
 
-                def _get(key, default=None):
-                    if isinstance(node_state, dict):
-                        return node_state.get(key, default)
-                    return getattr(node_state, key, default)
+                event_type = event.get("event")
+                self.logger.debug(f"[STREAM] event_type={event_type}")
 
-                if _get("error"):
-                    yield {
-                        "node": node_name,
-                        "status": "error",
-                        "error": _get("error"),
-                    }
-                    continue
+                # Token 级流式：LLM 返回的每个 token chunk
+                if event_type == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "delta") and chunk.delta:
+                        delta = chunk.delta
+                        if hasattr(delta, "content") and delta.content:
+                            token = delta.content
+                            current_answer.append(token)
+                            yield {
+                                "node": current_node or "agent_node",
+                                "status": "chunk",
+                                "content": token,
+                            }
 
-                yield {
-                    "node": node_name,
-                    "status": "processing",
-                    "state": {
-                        "kb_context": _get("kb_context"),
-                        "tool_context": _get("tool_context"),
-                        "final_context": _get("final_context"),
-                    },
-                }
+                # 节点开始
+                elif event_type == "on_chain_start":
+                    node_name = event.get("name")
+                    if node_name:
+                        current_node = node_name
+                        self.logger.info(f"[STREAM] >>> node start: {node_name}")
 
-                if node_name in ("agent_node", "generate_answer", "build_context"):
-                    messages = _get("messages") or []
-                    ai_msgs = [
-                        msg.content
-                        for msg in messages
-                        if isinstance(msg, AIMessage)
-                        and not getattr(msg, "tool_calls", None)
-                    ]
-                    if ai_msgs:
-                        yield {
+                # 节点结束
+                elif event_type == "on_chain_end":
+                    node_name = event.get("name")
+                    if node_name in ("agent_node", "generate_answer") and current_answer:
+                        full_answer = "".join(current_answer)
+                        self.logger.info(f"[STREAM] <<< node end: {node_name}, answer_len={len(full_answer)}")
+                        complete_event = {
                             "node": node_name,
                             "status": "complete",
-                            "answer": ai_msgs[-1],
-                            "context": _get("final_context"),
+                            "answer": full_answer,
+                            "context": "",
                         }
+                        if kwargs.get("debug") and self.langfuse_client:
+                            if hasattr(langfuse_context, "get_trace_url"):
+                                complete_event["trace_url"] = langfuse_context.get_trace_url()
+                            elif hasattr(langfuse_context, "get_trace_id"):
+                                trace_id = langfuse_context.get_trace_id()
+                                if trace_id and self.langfuse_client.host:
+                                    complete_event["trace_url"] = f"{self.langfuse_client.host}/project/1/traces/{trace_id}"
+                        yield complete_event
+                        current_answer = []
+
+                # 错误处理
+                elif event_type == "on_chain_error" or event_type == "on_error":
+                    self.logger.error(f"[STREAM] error: {event}")
+                    yield {
+                        "node": current_node or "unknown",
+                        "status": "error",
+                        "error": str(event.get("error", "Unknown error")),
+                    }
 
         except Exception as e:
-            self.logger.error(f"流式问答处理失败: {e}")
+            self.logger.exception(f"流式问答处理失败: {e}")
             yield {"status": "error", "error": f"处理请求时出错: {str(e)}"}
+        finally:
+            # Ensure streaming buffer is cleaned up on any exit path
+            current_answer.clear()
 
     async def batch_ask(self, questions: List[str], **kwargs) -> List[Dict[str, Any]]:
         """批量问答 - 纯 async"""
