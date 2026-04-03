@@ -7,6 +7,7 @@
 """
 
 from typing import Any, Dict, List, Optional
+import asyncio
 
 import numpy as np
 
@@ -110,21 +111,27 @@ class QueryTransformer:
         self.logger.debug(f"原始查询: {query}")
 
         try:
-            # 生成假设答案
+            # 生成假设答案（并行）
             hypo_docs = []
             prompt_template = self.get_templates("hyde").format(original_query=query)
             self.logger.debug("已构建 HyDE 提示模板")
 
+            # 构建所有任务并并行执行
+            tasks = []
             for i in range(num_hypo):
-                self.logger.debug(f"生成第 {i + 1}/{num_hypo} 个假设答案")
+                self.logger.debug(f"准备生成第 {i + 1}/{num_hypo} 个假设答案")
                 messages = self.message_builder.build(
                     query, system_prompt_template=prompt_template
                 )
-                hypo = self.llm.chat(
+                tasks.append(self.llm.achat(
                     messages,
                     extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                ).strip()
-                hypo_docs.append(hypo)
+                ))
+
+            # 并发执行所有任务
+            hypo_results = await asyncio.gather(*tasks)
+            hypo_docs = [h.strip() for h in hypo_results]
+            for i, hypo in enumerate(hypo_docs):
                 self.logger.debug(f"假设答案 {i + 1}: {hypo[:100]}...")
 
             # 生成向量

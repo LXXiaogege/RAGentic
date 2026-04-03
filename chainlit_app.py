@@ -35,6 +35,9 @@ _SHOW_NODES = {"retrieve_knowledge", "call_tools", "transform_query"}
 _STREAM_CHUNK_SIZE = 6
 _CONTEXT_PREVIEW_MAX_LEN = 500
 
+# Pipeline 实例缓存，按会话ID缓存，实现管道复用
+_pipeline_cache: dict[str, LangGraphQAPipeline] = {}
+
 
 @cl.on_app_startup
 async def on_startup():
@@ -229,9 +232,14 @@ async def on_message(message: cl.Message):
 
 
 async def _get_pipeline_and_config(
-    use_memory, top_k, use_sparse, use_reranker, enable_think
+    session_id: str, use_memory: bool, top_k: int, use_sparse: bool, use_reranker: bool, enable_think: bool
 ):
-    """获取 pipeline 实例和请求配置"""
+    """获取 pipeline 实例和请求配置（带缓存，按会话ID复用管道实例）"""
+
+    # 检查缓存中是否已有该会话的管道实例
+    if session_id in _pipeline_cache:
+        logger.info(f"复用会话 {session_id} 的管道实例")
+        return _pipeline_cache[session_id]
 
     config = AppConfig()
 
@@ -246,6 +254,8 @@ async def _get_pipeline_and_config(
     )
 
     pipeline = LangGraphQAPipeline(req_config)
+    _pipeline_cache[session_id] = pipeline
+    logger.info(f"为会话 {session_id} 创建新的管道实例，缓存大小: {len(_pipeline_cache)}")
     return pipeline
 
 
@@ -260,7 +270,7 @@ async def _handle_stream(
 ):
     """流式处理 - 纯 async"""
     pipeline = await _get_pipeline_and_config(
-        use_memory, top_k, use_sparse, use_reranker, enable_think
+        session_id, use_memory, top_k, use_sparse, use_reranker, enable_think
     )
 
     answer_msg = cl.Message(content="", author="RAGentic")
@@ -370,7 +380,7 @@ async def _handle_sync(
 ):
     """同步处理 - 纯 async"""
     pipeline = await _get_pipeline_and_config(
-        use_memory, top_k, use_sparse, use_reranker, enable_think
+        session_id, use_memory, top_k, use_sparse, use_reranker, enable_think
     )
 
     try:

@@ -17,6 +17,7 @@ import redis.asyncio as redis
 from redisvl.extensions.cache.embeddings import EmbeddingsCache
 
 from src.configs.logger_config import setup_logger
+from langfuse.openai import AsyncOpenAI
 
 logger = setup_logger(__name__)
 
@@ -53,6 +54,8 @@ class LLMResponseCache:
         self._embedding_cache: Optional[EmbeddingsCache] = None
         # Redis 异步客户端，用于直接操作 response hash
         self._redis_client: Optional[redis.Redis] = None
+        # AsyncOpenAI 客户端，复用连接
+        self._aclient: Optional[AsyncOpenAI] = None
 
     async def _get_embedding_cache(self) -> EmbeddingsCache:
         if self._embedding_cache is None:
@@ -80,14 +83,13 @@ class LLMResponseCache:
         return f"{self.RESPONSE_KEY_PREFIX}:{query_hash}"
 
     async def _get_embedding(self, texts: list[str]) -> list[list[float]]:
-        """调用 embedding API 获取文本向量"""
-        from langfuse.openai import AsyncOpenAI
-
-        aclient = AsyncOpenAI(
-            api_key=self.embedding_api_key,
-            base_url=self.embedding_base_url,
-        )
-        response = await aclient.embeddings.create(
+        """调用 embedding API 获取文本向量（复用 AsyncOpenAI 客户端）"""
+        if self._aclient is None:
+            self._aclient = AsyncOpenAI(
+                api_key=self.embedding_api_key,
+                base_url=self.embedding_base_url,
+            )
+        response = await self._aclient.embeddings.create(
             model=self.embedding_model,
             input=texts,
         )

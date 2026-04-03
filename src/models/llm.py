@@ -229,17 +229,13 @@ class LLMWrapper:
         query_text = self._extract_last_user_message(messages)
         if self._should_use_cache(stream, return_raw, kwargs) and query_text:
             try:
+                # 如果已经在事件循环中，跳过同步缓存查询（异步路径会处理）
+                # 这避免了在新线程中创建事件循环的开销
                 loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # 在新线程中运行异步缓存查找，避免阻塞事件循环
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        cached = list(executor.map(
-                            lambda: asyncio.run(self._cache.aget(query_text)),
-                            [None]
-                        ))[0]
-                else:
+                if not loop.is_running():
                     cached = asyncio.run(self._cache.aget(query_text))
+                else:
+                    cached = None  # 异步上下文由 achat() 处理
 
                 if cached:
                     self.logger.info(f"LLM 缓存命中: {query_text[:50]}...")

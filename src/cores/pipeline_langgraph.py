@@ -190,7 +190,7 @@ class LangGraphQAPipeline:
             else True,
         )
         self._memory_service: Optional[HybridMemoryService] = None
-        self._memory_initialized = False
+        self._memory_init_event = asyncio.Event()  # 使用 Event 替代 boolean 标志
         self._memory_init_lock = asyncio.Lock()
         self.logger.info("记忆服务配置完成，将在首次使用时初始化")
 
@@ -556,7 +556,9 @@ class LangGraphQAPipeline:
                     query = args.get("query", "") if isinstance(args, dict) else ""
                     mode = args.get("mode", "rewrite") if isinstance(args, dict) else "rewrite"
                     try:
-                        rewritten = self.query_transformer.transform_query(query, mode=mode)
+                        rewritten = await asyncio.to_thread(
+                            self.query_transformer.transform_query, query, mode=mode
+                        )
                         results_map[tc["id"]] = f"改写后查询：{rewritten}"
                         self.logger.info(
                             f"[TOOLS_NODE]   query_rewrite [{query}] ({mode}) => {rewritten[:50]}..."
@@ -731,13 +733,13 @@ class LangGraphQAPipeline:
 
     async def _ensure_memory_initialized(self) -> None:
         """确保记忆服务已初始化（async，线程安全）"""
-        if self._memory_initialized:
+        if self._memory_init_event.is_set():
             return
 
         async with self._memory_init_lock:
-            if self._memory_initialized:
-                return
-            await self._init_memory()
+            if not self._memory_init_event.is_set():
+                await self._init_memory()
+                self._memory_init_event.set()
 
     async def _init_memory(self) -> None:
         """实际初始化记忆服务的逻辑"""
@@ -754,7 +756,6 @@ class LangGraphQAPipeline:
                 )
 
             await self._memory_service.initialize()
-            self._memory_initialized = True
             self.logger.info("记忆服务初始化完成")
         except Exception as e:
             self.logger.warning(f"记忆服务初始化失败: {e}，将使用简单记忆模式")
