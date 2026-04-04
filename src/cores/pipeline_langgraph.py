@@ -1092,6 +1092,35 @@ class LangGraphQAPipeline:
                                 "content": token,
                             }
 
+                # MiniMax 等模型通过 on_chain_stream 传递完整 AIMessage（而非 token 级流式）
+                elif event_type == "on_chain_stream":
+                    node_name = event.get("name")
+                    # 只处理 agent_node，跳过 LangGraph 等父节点
+                    if node_name != "agent_node":
+                        continue
+
+                    chunk_data = event.get("data", {}).get("chunk")
+                    # chunk_data 可能是 QAState 对象
+                    messages_in_chunk = None
+                    if hasattr(chunk_data, "messages"):
+                        messages_in_chunk = chunk_data.messages
+                    elif isinstance(chunk_data, dict) and "messages" in chunk_data:
+                        messages_in_chunk = chunk_data["messages"]
+
+                    if messages_in_chunk and isinstance(messages_in_chunk, list):
+                        for msg in messages_in_chunk:
+                            if hasattr(msg, "content") and msg.content:
+                                # 移除 thinking（<think>...</think>）后提取真正的回复
+                                import re
+                                clean_content = re.sub(r'<think>.*?</think>', '', msg.content, flags=re.DOTALL).strip()
+                                if clean_content and clean_content not in "".join(current_answer):
+                                    current_answer.append(clean_content)
+                                    yield {
+                                        "node": node_name or "agent_node",
+                                        "status": "chunk",
+                                        "content": clean_content,
+                                    }
+
                 # 节点开始
                 elif event_type == "on_chain_start":
                     node_name = event.get("name")
@@ -1104,11 +1133,19 @@ class LangGraphQAPipeline:
                     node_name = event.get("name")
                     if node_name in ("agent_node", "generate_answer") and current_answer:
                         full_answer = "".join(current_answer)
-                        self.logger.info(f"[STREAM] <<< node end: {node_name}, answer_len={len(full_answer)}")
+                        # MiniMax 模型的 current_answer 可能包含 thinking（<think>...</think>）
+                        # 尝试提取真正的回复内容（thinking 之后的部分）
+                        import re
+                        # 移除 <think>...</think> 包裹的 thinking
+                        clean_answer = re.sub(r'<think>.*?</think>', '', full_answer, flags=re.DOTALL).strip()
+                        if not clean_answer and full_answer:
+                            # 如果清理后为空，使用原始内容
+                            clean_answer = full_answer
+                        self.logger.info(f"[STREAM] <<< node end: {node_name}, answer_len={len(full_answer)}, clean_len={len(clean_answer)}")
                         complete_event = {
                             "node": node_name,
                             "status": "complete",
-                            "answer": full_answer,
+                            "answer": clean_answer,
                             "context": "",
                         }
                         if kwargs.get("debug") and self.langfuse_client:

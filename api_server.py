@@ -7,6 +7,7 @@ FastAPI backend exposing LangGraphQAPipeline via REST/SSE endpoints
 import os
 import uuid
 import asyncio
+import json
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -159,7 +160,8 @@ async def ask_stream(request: AskRequest):
                 node = event.get("node", "")
 
                 if status == "chunk":
-                    yield f"event: chunk\ndata: {event.get('content', '')}\n\n"
+                    chunk_content = event.get('content', '').replace('\n', '\\n')
+                    yield f"event: chunk\ndata: {chunk_content}\n\n"
 
                 elif status == "processing" and node:
                     step_data = {
@@ -167,21 +169,21 @@ async def ask_stream(request: AskRequest):
                         "status": "processing",
                         "state": event.get("state", {}),
                     }
-                    yield f"event: step\ndata: {str(step_data)}\n\n"
+                    yield f"event: step\ndata: {json.dumps(step_data, ensure_ascii=False)}\n\n"
 
                 elif status == "complete":
                     answer = event.get("answer", "")
                     context = event.get("context", "")
                     complete_data = {"answer": answer, "context": context}
-                    yield f"event: complete\ndata: {str(complete_data)}\n\n"
+                    yield f"event: complete\ndata: {json.dumps(complete_data, ensure_ascii=False)}\n\n"
 
                 elif status == "error":
                     error_msg = event.get("error", "未知错误")
-                    yield f"event: error\ndata: {error_msg}\n\n"
+                    yield f"event: error\ndata: {json.dumps(error_msg, ensure_ascii=False)}\n\n"
 
         except Exception as e:
             logger.exception("流式问答处理异常")
-            yield f"event: error\ndata: {str(e)}\n\n"
+            yield f"event: error\ndata: {json.dumps(str(e), ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
