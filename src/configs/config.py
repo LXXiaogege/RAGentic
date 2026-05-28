@@ -9,7 +9,6 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field, ConfigDict
 
-from src.configs.evaluate_config import EvaluationConfig
 from src.configs.memory_config import Mem0Config
 from src.configs.model_config import (
     LLMConfig,
@@ -74,10 +73,6 @@ class AppConfig(BaseSettings):
         default_factory=MessageBuilderConfig, description="消息构建配置"
     )
     tools: ToolsConfig = Field(default_factory=ToolsConfig, description="工具配置")
-
-    evaluation: EvaluationConfig = Field(
-        default_factory=EvaluationConfig, description="评估配置"
-    )
 
     langfuse: LangfuseConfig = Field(
         default_factory=LangfuseConfig, description="Langfuse 配置"
@@ -266,6 +261,5 @@ class AppConfig(BaseSettings):
         new_config.prompt = self.prompt
         new_config.message_builder = self.message_builder
         new_config.tools = self.tools
-        new_config.evaluation = self.evaluation
         new_config.langfuse = self.langfuse
         return new_config

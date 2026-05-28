@@ -112,13 +112,19 @@ class TestQAPipelineNodes:
         config.retrieve.use_memory = True
         pipeline = create_pipeline_with_mocks(config)
         pipeline._memory_settings.enable_ltm = True
-        pipeline._search_memory_context = AsyncMock(return_value="【长期记忆】用户偏好")
+        pipeline._search_memory_context_with_hits = AsyncMock(
+            return_value=(
+                "【长期记忆】用户偏好",
+                [{"text": "用户偏好", "score": 0.9, "metadata": {}}],
+            )
+        )
 
         state = QAState(original_query="测试")
         result = await pipeline._load_memory_context(state)
 
-        pipeline._search_memory_context.assert_awaited_once_with("测试")
+        pipeline._search_memory_context_with_hits.assert_awaited_once_with("测试")
         assert result.memory_context == "【长期记忆】用户偏好"
+        assert result.memory_hits[0]["text"] == "用户偏好"
 
     @pytest.mark.asyncio
     async def test_build_context_light_rag_searches_kb(self, config, mock_components):
@@ -128,13 +134,57 @@ class TestQAPipelineNodes:
         pipeline = create_pipeline_with_mocks(config)
         pipeline._memory_service = None
         pipeline.kb_tools = Mock()
-        pipeline.kb_tools.kb_search = AsyncMock(return_value="【知识库】命中文档")
+        pipeline.kb_tools.kb_search_records = AsyncMock(
+            return_value=[
+                {
+                    "text": "命中文档",
+                    "title": "文档 A",
+                    "source": "a.md",
+                    "score": 0.88,
+                    "metadata": {},
+                }
+            ]
+        )
+        pipeline.kb_tools.format_records.return_value = "【知识库】命中文档"
 
         state = QAState(original_query="测试")
         result = await pipeline._build_context(state)
 
-        pipeline.kb_tools.kb_search.assert_awaited_once()
+        pipeline.kb_tools.kb_search_records.assert_awaited_once()
         assert "命中文档" in result.final_context
+        assert result.sources
+        assert result.answer_basis == "kb"
+
+    def test_determine_answer_basis(self, config):
+        """测试答案依据标签"""
+        pipeline = create_pipeline_with_mocks(config)
+
+        assert pipeline._determine_answer_basis(QAState(original_query="测试")) == "model"
+        assert (
+            pipeline._determine_answer_basis(
+                QAState(original_query="测试", sources=[{"text": "知识片段"}])
+            )
+            == "kb"
+        )
+        assert (
+            pipeline._determine_answer_basis(
+                QAState(
+                    original_query="测试",
+                    memory_hits=[{"text": "记忆"}],
+                )
+            )
+            == "memory"
+        )
+        assert (
+            pipeline._determine_answer_basis(
+                QAState(
+                    original_query="测试",
+                    sources=[{"text": "知识片段"}],
+                    memory_hits=[{"text": "记忆"}],
+                )
+            )
+            == "mixed"
+        )
 
     @pytest.mark.asyncio
     async def test_update_memory_node_disabled(self, config, mock_components):

@@ -157,7 +157,6 @@ RAGentic/
 │   │   └── mem0_manager.py
 │   ├── data_process/        # 数据处理
 │   │   └── loaders/
-│   ├── evaluate/            # RAG 评估
 │   ├── skills/              # Agent 技能
 │   └── utils/               # 工具函数
 ├── frontend/                # Next.js 前端

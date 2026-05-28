@@ -19,7 +19,6 @@ RAGentic/
 │   ├── cores/           # Core pipeline logic (LangGraph)
 │   ├── data_process/    # Data processing
 │   ├── db_services/     # Database operations (Milvus)
-│   ├── evaluate/        # RAG evaluation
 │   ├── memory/          # Conversation memory (Mem0)
 │   ├── mcp/             # MCP tool integration
 │   ├── models/          # LLM/Embedding wrappers
@@ -140,7 +139,6 @@ PYTHONPATH=. uv run pytest -v tests/test_memory.py::test_memory_init
 - `tests/test_embedding.py` - Embedding model tests
 - `tests/test_memory.py` - Memory system tests
 - `tests/a2a_client_test.py` - A2A client tests
-- `tests/test_rag_evaluate.py` - RAG evaluation tests
 
 ## 🔧 Linting & Formatting
 

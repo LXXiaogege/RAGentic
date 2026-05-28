@@ -12,6 +12,7 @@
 
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from typing import Annotated, Any, Callable, Dict, Generator, List, Optional
 
@@ -70,6 +71,10 @@ class QAState(BaseModel):
     tool_context: Optional[str] = None
     memory_context: Optional[str] = None
     final_context: Optional[str] = None
+    answer_basis: str = "model"
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    tool_traces: List[Dict[str, Any]] = Field(default_factory=list)
+    memory_hits: List[Dict[str, Any]] = Field(default_factory=list)
 
     error: Optional[str] = None
     agent_stop_reason: Optional[str] = None
@@ -82,6 +87,7 @@ class QAState(BaseModel):
     stream: bool = False
     agent_used_tools: bool = False
     initial_message_count: int = 0
+    allow_model_fallback: bool = True
 
 
 def build_prompt_messages(
@@ -109,6 +115,12 @@ def build_prompt_messages(
     context_text = state.final_context or state.memory_context
     if context_text:
         query_content = f"上下文信息：\n{context_text}\n\n问题：{query_content}"
+    elif not state.allow_model_fallback:
+        query_content = (
+            "请仅基于知识库、工具结果或记忆回答。当前没有可引用上下文时，"
+            "请明确说明未找到足够依据，不要使用模型常识补充。\n\n"
+            f"问题：{query_content}"
+        )
 
     messages.append(HumanMessage(content=query_content))
 
@@ -303,17 +315,27 @@ class LangGraphQAPipeline:
         if not self.config.retrieve.use_memory or not self._memory_settings.enable_ltm:
             return state
 
-        memory_context = await self._search_memory_context(state.original_query)
+        memory_context, memory_hits = await self._search_memory_context_with_hits(
+            state.original_query
+        )
         if memory_context:
             state.memory_context = memory_context
+            state.memory_hits = memory_hits
             self.logger.info(f"预加载长期记忆上下文，长度：{len(memory_context)}")
         return state
 
     async def _search_memory_context(self, query: str) -> str:
         """搜索长期记忆并格式化为上下文；失败时降级为空字符串。"""
+        memory_context, _ = await self._search_memory_context_with_hits(query)
+        return memory_context
+
+    async def _search_memory_context_with_hits(
+        self, query: str
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """搜索长期记忆，返回 prompt 上下文和可展示的命中记录。"""
         await self._ensure_memory_initialized()
         if not self._memory_service or not self._memory_service.is_initialized:
-            return ""
+            return "", []
 
         try:
             ltm_results = await self._memory_service.search(
@@ -323,15 +345,38 @@ class LangGraphQAPipeline:
                 threshold=self._memory_settings.ltm_search_threshold,
             )
             if not ltm_results:
-                return ""
+                return "", []
             self.logger.info(f"搜索到 {len(ltm_results)} 条长期记忆")
-            return self._memory_service.format_ltm_for_context(
+            memory_context = self._memory_service.format_ltm_for_context(
                 ltm_results,
                 prefix="【长期记忆】",
             )
+            return memory_context, self._normalize_memory_hits(ltm_results)
         except Exception as e:
             self.logger.warning(f"搜索长期记忆失败: {e}")
-            return ""
+            return "", []
+
+    def _normalize_memory_hits(self, ltm_results: list[Any]) -> list[dict[str, Any]]:
+        """将不同记忆后端的结果统一成前端可展示结构。"""
+        hits: list[dict[str, Any]] = []
+        for item in ltm_results:
+            if isinstance(item, dict):
+                text = (
+                    item.get("memory")
+                    or item.get("text")
+                    or item.get("content")
+                    or item.get("value")
+                    or ""
+                )
+                score = item.get("score") or item.get("similarity")
+                metadata = item.get("metadata") or {}
+            else:
+                text = str(item)
+                score = None
+                metadata = {}
+            if text:
+                hits.append({"text": text, "score": score, "metadata": metadata})
+        return hits
 
     def _should_call_tools(self, state: QAState) -> str:
         """根据请求配置选择重 Agent 路径或轻 RAG 路径。"""
@@ -656,14 +701,16 @@ class LangGraphQAPipeline:
                             self.logger.info("HyDE vector generated in tools_node")
                         except Exception as e:
                             self.logger.warning(f"HyDE vector generation failed: {e}")
-                    kb_tasks.append(self.kb_tools.kb_search(
+                    kb_tasks.append(self.kb_tools.kb_search_records(
                         query=query,
                         top_k=top_k,
                         hyde_vector=hyde_vector,
                     ))
                 kb_results = await asyncio.gather(*kb_tasks)
-                for tc, result in zip(kb_tool_calls, kb_results):
-                    results_map[tc["id"]] = result
+                for tc, records in zip(kb_tool_calls, kb_results):
+                    result = self.kb_tools.format_records(records)
+                    results_map[tc["id"]] = result or "未在知识库中找到相关内容。"
+                    state.sources.extend(records)
                     args = (
                         tc.get("args", {}) if isinstance(tc.get("args"), dict) else {}
                     )
@@ -705,9 +752,9 @@ class LangGraphQAPipeline:
 
             history = list(state.tool_calls_history)
             for tc, result in zip(tool_calls, ordered_results):
-                history.append(
-                    {"tool": tc["name"], "args": tc["args"], "result": result}
-                )
+                trace = {"tool": tc["name"], "args": tc["args"], "result": result}
+                history.append(trace)
+                state.tool_traces.append(trace)
             # Enforce max_tool_calls_history limit with FIFO eviction
             max_history = self.config.retrieve.max_tool_calls_history
             if len(history) > max_history:
@@ -757,6 +804,14 @@ class LangGraphQAPipeline:
         try:
             self.logger.info("开始生成答案")
 
+            if not state.allow_model_fallback and not state.final_context:
+                state.messages += [
+                    HumanMessage(content=state.original_query),
+                    AIMessage(content="未找到足够的知识库、工具或记忆依据，无法仅基于可引用上下文回答。"),
+                ]
+                state.answer_basis = self._determine_answer_basis(state)
+                return state
+
             system_prompt = (
                 self.config.prompt.kb_system_prompt
                 if self.config.retrieve.use_kb
@@ -791,6 +846,7 @@ class LangGraphQAPipeline:
                 HumanMessage(content=state.original_query),
                 AIMessage(content=answer),
             ]
+            state.answer_basis = self._determine_answer_basis(state)
 
             self.logger.info("答案生成完成")
             return state
@@ -867,17 +923,19 @@ class LangGraphQAPipeline:
                     f"[BUILD_CONTEXT]   use_kb=True, kb_context is empty, searching kb with query={query}"
                 )
                 try:
-                    kb_results = await self.kb_tools.kb_search(
+                    records = await self.kb_tools.kb_search_records(
                         query,
                         top_k=self.config.retrieve.top_k,
                         hyde_vector=getattr(state, "hyde_vector", None),
                     )
+                    kb_results = self.kb_tools.format_records(records)
                     if kb_results:
                         state.kb_context = kb_results
+                        state.sources.extend(records)
                         context_parts.append(kb_results)
-                        self.logger.info(
-                            f"[BUILD_CONTEXT]   kb search returned {len(kb_results)} chars"
-                        )
+                    self.logger.info(
+                        f"[BUILD_CONTEXT]   kb search returned {len(kb_results)} chars"
+                    )
                 except Exception as e:
                     self.logger.warning(f"[BUILD_CONTEXT]   kb search failed: {e}")
 
@@ -887,12 +945,16 @@ class LangGraphQAPipeline:
                     f"[BUILD_CONTEXT]   added memory_context, len={len(state.memory_context)}"
                 )
             elif self.config.retrieve.use_memory and self._memory_settings.enable_ltm:
-                memory_context = await self._search_memory_context(state.original_query)
+                memory_context, memory_hits = (
+                    await self._search_memory_context_with_hits(state.original_query)
+                )
                 if memory_context:
                     state.memory_context = memory_context
+                    state.memory_hits = memory_hits
                     context_parts.append(memory_context)
 
             state.final_context = "\n\n".join(context_parts)
+            state.answer_basis = self._determine_answer_basis(state)
             self.logger.info(f"上下文构建完成，长度：{len(state.final_context)}")
 
             return state
@@ -907,9 +969,47 @@ class LangGraphQAPipeline:
                     metadata={
                         "has_kb_context": bool(getattr(state, "kb_context", None)),
                         "kb_context_length": len(getattr(state, "kb_context", "") or ""),
-                        "has_memory_context": bool(getattr(state, "tool_context", None)),
+                        "has_memory_context": bool(
+                            getattr(state, "memory_context", None)
+                        ),
                     }
                 )
+
+    def _determine_answer_basis(self, state: QAState) -> str:
+        """根据本轮实际进入 prompt/工具链的依据，生成前端标签。"""
+        bases: list[str] = []
+        if state.sources or state.kb_context:
+            bases.append("kb")
+        non_kb_tool_traces = [
+            trace for trace in state.tool_traces if trace.get("tool") != "kb_search"
+        ]
+        if non_kb_tool_traces or (state.tool_context and not state.tool_traces):
+            bases.append("tool")
+        if state.memory_hits or state.memory_context:
+            bases.append("memory")
+        unique_bases = list(dict.fromkeys(bases))
+        if len(unique_bases) > 1:
+            return "mixed"
+        return unique_bases[0] if unique_bases else "model"
+
+    def _extract_trust_fields(self, state_like: Any) -> dict[str, Any]:
+        """从 LangGraph stream 事件中的 state/dict 提取可信问答字段。"""
+        if state_like is None:
+            return {}
+        getter = state_like.get if isinstance(state_like, dict) else None
+
+        def read(name: str, default: Any) -> Any:
+            if getter:
+                return getter(name, default)
+            return getattr(state_like, name, default)
+
+        return {
+            "context": read("final_context", "") or "",
+            "answer_basis": read("answer_basis", "model") or "model",
+            "sources": read("sources", []) or [],
+            "tool_traces": read("tool_traces", []) or [],
+            "memory_hits": read("memory_hits", []) or [],
+        }
 
     @timing_decorator
     async def _update_memory(self, state: QAState) -> QAState:
@@ -961,9 +1061,10 @@ class LangGraphQAPipeline:
         if not hasattr(state, "messages") or state.messages is None:
             state.messages = []
 
-        state.messages.append(
-            AIMessage(content=f"抱歉，处理您的请求时出现错误：{error_msg}")
-        )
+        if not state.messages:
+            state.messages.append(
+                AIMessage(content=f"抱歉，处理您的请求时出现错误：{error_msg}")
+            )
 
         return state
 
@@ -1083,6 +1184,7 @@ class LangGraphQAPipeline:
             original_query=query,
             messages=existing_messages,
             initial_message_count=len(existing_messages),
+            allow_model_fallback=kwargs.get("allow_model_fallback", True),
         )
 
         try:
@@ -1110,6 +1212,10 @@ class LangGraphQAPipeline:
                 "tool_calls_history": result.get("tool_calls_history", []),
                 "agent_iterations": result.get("agent_iteration", 0),
                 "cache_hit": result.get("cache_hit", False),
+                "answer_basis": result.get("answer_basis", "model"),
+                "sources": result.get("sources", []),
+                "tool_traces": result.get("tool_traces", []),
+                "memory_hits": result.get("memory_hits", []),
             }
 
             # trace_url 仅在 debug=True 且 Langfuse 启用时返回
@@ -1136,7 +1242,14 @@ class LangGraphQAPipeline:
 
     def ask_sync(self, query: str, **kwargs) -> Dict[str, Any]:
         """同步问答接口（内部使用 asyncio.run）"""
-        return asyncio.run(self.ask(query, **kwargs))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.ask(query, **kwargs))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(lambda: asyncio.run(self.ask(query, **kwargs)))
+            return future.result()
 
     async def ask_stream(
         self, query: str, **kwargs
@@ -1156,6 +1269,7 @@ class LangGraphQAPipeline:
             original_query=query,
             messages=[],
             stream=True,
+            allow_model_fallback=kwargs.get("allow_model_fallback", True),
         )
 
         current_answer = []
@@ -1223,6 +1337,9 @@ class LangGraphQAPipeline:
                 elif event_type == "on_chain_end":
                     node_name = event.get("name")
                     if node_name in ("agent_node", "generate_answer") and current_answer:
+                        trust_fields = self._extract_trust_fields(
+                            event.get("data", {}).get("output")
+                        )
                         full_answer = "".join(current_answer)
                         # MiniMax 模型的 current_answer 可能包含 thinking（<think>...</think>）
                         # 尝试提取真正的回复内容（thinking 之后的部分）
@@ -1237,7 +1354,11 @@ class LangGraphQAPipeline:
                             "node": node_name,
                             "status": "complete",
                             "answer": clean_answer,
-                            "context": "",
+                            "context": trust_fields.get("context", ""),
+                            "answer_basis": trust_fields.get("answer_basis", "model"),
+                            "sources": trust_fields.get("sources", []),
+                            "tool_traces": trust_fields.get("tool_traces", []),
+                            "memory_hits": trust_fields.get("memory_hits", []),
                         }
                         if kwargs.get("debug") and self.langfuse_client:
                             if hasattr(langfuse_context, "get_trace_url"):

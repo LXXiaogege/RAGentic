@@ -2,6 +2,7 @@
 """API Server cache behavior tests."""
 
 import pytest
+from unittest.mock import AsyncMock
 
 import api_server
 
@@ -14,6 +15,20 @@ class FakePipeline:
 
     async def cleanup(self):
         FakePipeline.cleanup_calls += 1
+
+
+class FakeAskPipeline(FakePipeline):
+    async def ask(self, **kwargs):
+        return {
+            "answer": "可信答案",
+            "context": "上下文",
+            "kb_context": "知识库上下文",
+            "tool_context": "",
+            "answer_basis": "kb",
+            "sources": [{"text": "知识片段", "title": "文档 A", "score": 0.9}],
+            "tool_traces": [],
+            "memory_hits": [],
+        }
 
 
 @pytest.fixture(autouse=True)
@@ -70,3 +85,26 @@ async def test_pipeline_cache_evicts_overflow(monkeypatch):
     assert first is not second
     assert len(api_server._pipeline_cache) == 1
     assert FakePipeline.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ask_response_includes_trust_fields(monkeypatch):
+    monkeypatch.setattr(
+        api_server,
+        "get_pipeline",
+        AsyncMock(return_value=FakeAskPipeline(None)),
+    )
+
+    response = await api_server.ask(
+        api_server.AskRequest(
+            query="测试",
+            session_id="s1",
+            use_memory=False,
+            allow_model_fallback=False,
+        )
+    )
+
+    assert response.answer_basis == "kb"
+    assert response.sources[0]["text"] == "知识片段"
+    assert response.tool_traces == []
+    assert response.memory_hits == []

@@ -9,7 +9,7 @@ import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -56,6 +56,7 @@ class AskRequest(BaseModel):
     use_sparse: bool = False
     use_reranker: bool = False
     enable_think: bool = False
+    allow_model_fallback: bool = True
 
 
 class AskResponse(BaseModel):
@@ -64,6 +65,10 @@ class AskResponse(BaseModel):
     context: Optional[str] = None
     kb_context: Optional[str] = None
     tool_context: Optional[str] = None
+    answer_basis: Optional[str] = None
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+    tool_traces: list[dict[str, Any]] = Field(default_factory=list)
+    memory_hits: list[dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -163,6 +168,7 @@ async def ask(request: AskRequest):
             query=request.query,
             thread_id=session_id,
             langfuse_session_id=session_id,
+            allow_model_fallback=request.allow_model_fallback,
         )
 
         if result.get("error"):
@@ -178,6 +184,10 @@ async def ask(request: AskRequest):
             context=result.get("context", ""),
             kb_context=result.get("kb_context", ""),
             tool_context=result.get("tool_context", ""),
+            answer_basis=result.get("answer_basis", "model"),
+            sources=result.get("sources", []),
+            tool_traces=result.get("tool_traces", []),
+            memory_hits=result.get("memory_hits", []),
         )
     except Exception as e:
         logger.exception("同步问答处理异常")
@@ -208,6 +218,7 @@ async def ask_stream(request: AskRequest):
                 query=request.query,
                 thread_id=session_id,
                 langfuse_session_id=session_id,
+                allow_model_fallback=request.allow_model_fallback,
             ):
                 status = event.get("status")
                 node = event.get("node", "")
@@ -227,7 +238,14 @@ async def ask_stream(request: AskRequest):
                 elif status == "complete":
                     answer = event.get("answer", "")
                     context = event.get("context", "")
-                    complete_data = {"answer": answer, "context": context}
+                    complete_data = {
+                        "answer": answer,
+                        "context": context,
+                        "answer_basis": event.get("answer_basis", "model"),
+                        "sources": event.get("sources", []),
+                        "tool_traces": event.get("tool_traces", []),
+                        "memory_hits": event.get("memory_hits", []),
+                    }
                     yield f"event: complete\ndata: {json.dumps(complete_data, ensure_ascii=False)}\n\n"
 
                 elif status == "error":
