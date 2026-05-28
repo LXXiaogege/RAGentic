@@ -8,7 +8,7 @@
 LiteLLM 客户端封装 - 兼容现有 LLMWrapper 接口
 """
 
-from typing import Any, Dict, List, Optional, Union, Type, cast
+from typing import Any, Dict, List, Union, Type
 import json
 import litellm
 from litellm import acompletion, completion

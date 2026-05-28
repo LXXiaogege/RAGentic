@@ -49,7 +49,7 @@ venv.bak/
 openspec
 
 # GitHub Actions workflows
-!.github/
+.github/
 
 # Jupyter Notebook
 .ipynb_checkpoints

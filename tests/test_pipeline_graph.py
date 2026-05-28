@@ -32,7 +32,7 @@ def test_pipeline_graph_structure():
     assert "parse_query" not in mermaid
 
     print("✓ Graph structure validated")
-    print(f"  Nodes: route, agent_node, tools_node, build_context, generate_answer, update_memory, handle_error")
+    print("  Nodes: route, agent_node, tools_node, build_context, generate_answer, update_memory, handle_error")
 
 
 if __name__ == "__main__":

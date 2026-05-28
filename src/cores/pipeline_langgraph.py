@@ -66,10 +66,6 @@ class QAState(BaseModel):
     original_query: str
     transformed_query: Optional[str] = None
 
-    use_knowledge_base: Optional[bool] = None
-    use_tools: Optional[bool] = None
-    use_memory: Optional[bool] = None
-
     kb_context: Optional[str] = None
     tool_context: Optional[str] = None
     memory_context: Optional[str] = None
@@ -429,7 +425,6 @@ class LangGraphQAPipeline:
                 # 流式模式：迭代 chunks 收集完整响应
                 content_chunks = []
                 tool_calls_chunks = []
-                is_first_chunk = True
                 async for chunk in response:
                     if hasattr(chunk, "choices") and chunk.choices:
                         delta = chunk.choices[0].delta
@@ -438,7 +433,6 @@ class LangGraphQAPipeline:
                                 content_chunks.append(delta.content)
                             if hasattr(delta, "tool_calls") and delta.tool_calls:
                                 tool_calls_chunks.append(delta.tool_calls)
-                        is_first_chunk = False
                 full_content = "".join(content_chunks)
                 raw_message = type("RawMessage", (), {
                     "content": full_content,
@@ -1088,8 +1082,6 @@ class LangGraphQAPipeline:
         initial_state_object = QAState(
             original_query=query,
             messages=existing_messages,
-            use_knowledge_base=self.config.retrieve.use_kb,
-            use_memory=self.config.retrieve.use_memory,
             initial_message_count=len(existing_messages),
         )
 
@@ -1164,8 +1156,6 @@ class LangGraphQAPipeline:
             original_query=query,
             messages=[],
             stream=True,
-            use_knowledge_base=self.config.retrieve.use_kb,
-            use_memory=self.config.retrieve.use_memory,
         )
 
         current_answer = []

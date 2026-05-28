@@ -8,9 +8,6 @@
 Tests for memory leak fixes: BoundedMemorySaver and tool_calls_history bounds.
 """
 
-import asyncio
-from collections import defaultdict
-
 import pytest
 
 from src.cores.bounded_memory_saver import BoundedMemorySaver
@@ -180,7 +177,6 @@ class TestToolCallsHistoryBound:
             history.append(entry)
 
         if len(history) > max_history:
-            evicted = len(history) - max_history
             history = history[-max_history:]
 
         assert len(history) == 3

@@ -45,7 +45,7 @@ async def test_pipeline_with_kb():
     req_config = config.create_request_config(use_kb=True, top_k=3)
     pipeline = LangGraphQAPipeline(req_config)
 
-    result = await pipeline.ask("请介绍一下这个系统", use_knowledge_base=True)
+    result = await pipeline.ask("请介绍一下这个系统")
     print(f"With KB result: {result.get('answer', '')[:100]}...")
     print(f"Context: {result.get('context', '')[:100]}...")
     print("✓ With KB test passed")

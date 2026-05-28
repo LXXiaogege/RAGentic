@@ -8,7 +8,6 @@
 LLM 语义缓存 - 基于 RedisVL 向量相似度匹配，复用现有 Redis 基础设施
 """
 
-import asyncio
 import hashlib
 import json
 from typing import Any, Callable, Optional
@@ -76,9 +75,6 @@ class LLMResponseCache:
         """计算 query 文本的 SHA256 hash 作为 cache key"""
         return hashlib.sha256(query_text.encode("utf-8")).hexdigest()
 
-    def _build_cache_key(self, query_hash: str) -> str:
-        return f"{self.CACHE_PREFIX}:{query_hash}"
-
     def _build_response_key(self, query_hash: str) -> str:
         return f"{self.RESPONSE_KEY_PREFIX}:{query_hash}"
 
@@ -112,15 +108,10 @@ class LLMResponseCache:
             cache = await self._get_embedding_cache()
             redis_client = await self._get_redis_client()
 
-            # 1. 获取 query embedding
-            embeddings = await self._get_embedding([query_text])
-            query_embedding = embeddings[0]
-
-            # 2. 向量相似度搜索
+            # 1. 向量相似度搜索
             results = await cache.amget([query_text], model_name=self.embedding_model)
 
             if results and results[0] and results[0].get("embedding"):
-                cached_embedding = results[0]["embedding"]
                 # 计算余弦相似度（RedisVL 返回的已经是排序结果）
                 # 如果 similarity_threshold 满足，则命中
                 self.logger.info(f"LLMResponseCache: 命中缓存，相似度阈值={self.similarity_threshold}")
@@ -129,10 +120,10 @@ class LLMResponseCache:
                 cached_response = await redis_client.get(response_key)
                 if cached_response:
                     response_data = json.loads(cached_response.decode("utf-8"))
-                    self.logger.debug(f"LLMResponseCache: 从 Redis Hash 读取响应成功")
+                    self.logger.debug("LLMResponseCache: 从 Redis Hash 读取响应成功")
                     return response_data
 
-            self.logger.debug(f"LLMResponseCache: 未命中缓存")
+            self.logger.debug("LLMResponseCache: 未命中缓存")
             return None
 
         except Exception as e:

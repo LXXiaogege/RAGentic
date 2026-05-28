@@ -72,7 +72,7 @@ class TestQAPipelineNodes:
     """Pipeline 节点测试 - Async 版本"""
 
     @pytest.mark.asyncio
-    async def test_parse_query_node(self, config, mock_components):
+    async def test_route_query_node(self, config, mock_components):
         """测试入口路由节点"""
         pipeline = create_pipeline_with_mocks(config)
         state = QAState(original_query="测试问题")
@@ -95,7 +95,6 @@ class TestQAPipelineNodes:
         """测试上下文构建节点"""
         pipeline = create_pipeline_with_mocks(config)
         pipeline._memory_service = None
-        pipeline._memory_initialized = True
 
         state = QAState(
             original_query="测试",
