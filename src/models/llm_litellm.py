@@ -16,6 +16,7 @@ from langchain_core.messages import BaseMessage
 
 from src.configs.logger_config import setup_logger
 from src.models.message_adapter import MessageAdapter
+from src.models.response_utils import extract_text_response
 
 logger = setup_logger(__name__)
 
@@ -31,15 +32,36 @@ class LiteLLMClient:
 
     def _prepare_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """准备 litellm 调用参数"""
-        extra_body = kwargs.pop("extra_body", {}) or {}
+        kwargs = dict(kwargs)
+        extra_body = dict(kwargs.pop("extra_body", {}) or {})
 
-        chat_template_kwargs = extra_body.pop("chat_template_kwargs", {}) or {}
+        chat_template_kwargs = dict(extra_body.pop("chat_template_kwargs", {}) or {})
 
         if "enable_thinking" in chat_template_kwargs:
             kwargs["thinking"] = chat_template_kwargs["enable_thinking"]
 
         kwargs.update(extra_body)
         return kwargs
+
+    def _prepare_request(
+        self, model: str | None, kwargs: Dict[str, Any]
+    ) -> tuple[str, Dict[str, Any]]:
+        model = model or ""
+        prepared_kwargs = dict(kwargs)
+
+        if self.provider == "minimax":
+            if model.startswith("minimax/"):
+                model = model[len("minimax/") :]
+            prepared_kwargs["custom_llm_provider"] = "openai"
+            prepared_kwargs["drop_params"] = True
+        elif self.provider != "openai" and not model.startswith(self.provider + "/"):
+            model = f"{self.provider}/{model}"
+
+        prepared_kwargs = self._prepare_kwargs(prepared_kwargs)
+        prepared_kwargs["api_key"] = self.api_key
+        if self.base_url:
+            prepared_kwargs["api_base"] = self.base_url
+        return model, prepared_kwargs
 
     @observe(name="LiteLLM.chat", as_type="generation")
     def chat(
@@ -50,28 +72,14 @@ class LiteLLMClient:
         **kwargs,
     ):
         self.logger.info(f"[LiteLLM] chat request: model={model}, stream={stream}")
-        model = model or ""
-
-        if self.provider == "minimax":
-            # MiniMax 需要用 OpenAI 兼容模式，传递 custom_llm_provider
-            if model.startswith("minimax/"):
-                model = model[len("minimax/"):]
-            kwargs["custom_llm_provider"] = "openai"
-            kwargs["drop_params"] = True
-        elif self.provider != "openai" and not model.startswith(self.provider + "/"):
-            model = f"{self.provider}/{model}"
-
-        kwargs = self._prepare_kwargs(kwargs)
-        kwargs["api_key"] = self.api_key
-        if self.base_url:
-            kwargs["api_base"] = self.base_url
+        model, prepared_kwargs = self._prepare_request(model, kwargs)
 
         try:
             response = completion(
                 model=model,
                 messages=messages,
                 stream=stream,
-                **kwargs,
+                **prepared_kwargs,
             )
             self.logger.info("[LiteLLM] chat response received")
             return response
@@ -88,28 +96,14 @@ class LiteLLMClient:
         **kwargs,
     ):
         self.logger.info(f"[LiteLLM] achat request: model={model}, stream={stream}")
-        model = model or ""
-
-        if self.provider == "minimax":
-            # MiniMax 需要用 OpenAI 兼容模式，传递 custom_llm_provider
-            if model.startswith("minimax/"):
-                model = model[len("minimax/"):]
-            kwargs["custom_llm_provider"] = "openai"
-            kwargs["drop_params"] = True
-        elif self.provider != "openai" and not model.startswith(self.provider + "/"):
-            model = f"{self.provider}/{model}"
-
-        kwargs = self._prepare_kwargs(kwargs)
-        kwargs["api_key"] = self.api_key
-        if self.base_url:
-            kwargs["api_base"] = self.base_url
+        model, prepared_kwargs = self._prepare_request(model, kwargs)
 
         try:
             response = await acompletion(
                 model=model,
                 messages=messages,
                 stream=stream,
-                **kwargs,
+                **prepared_kwargs,
             )
             self.logger.info("[LiteLLM] achat response received")
             return response
@@ -129,6 +123,14 @@ class LiteLLMWrapper:
     def convert_messages_to_dicts(self, messages: List[BaseMessage]) -> List[Dict]:
         return MessageAdapter.to_openai_messages(messages)
 
+    def _prepare_call(
+        self, messages: List[Union[Dict, BaseMessage]], kwargs: dict
+    ) -> tuple[str | None, list[dict]]:
+        if messages and isinstance(messages[0], BaseMessage):
+            messages = self.convert_messages_to_dicts(messages)
+        model = kwargs.pop("model", None)
+        return model, messages
+
     def chat(
         self,
         messages: List[Union[Dict, BaseMessage]],
@@ -136,23 +138,18 @@ class LiteLLMWrapper:
         return_raw: bool = False,
         **kwargs,
     ):
-        if messages and isinstance(messages[0], BaseMessage):
-            messages = self.convert_messages_to_dicts(messages)
-
-        model = kwargs.pop("model", None)
+        model, messages_to_send = self._prepare_call(messages, kwargs)
 
         response = self.client.chat(
             model=model,
-            messages=messages,
+            messages=messages_to_send,
             stream=stream,
             **kwargs,
         )
 
         if return_raw or stream:
             return response
-        if not response.choices or response.choices[0].message.content is None:
-            raise ValueError("LLM 返回了空的 choices 或 content，请检查模型服务")
-        return response.choices[0].message.content
+        return extract_text_response(response)
 
     async def achat(
         self,
@@ -161,20 +158,15 @@ class LiteLLMWrapper:
         return_raw: bool = False,
         **kwargs,
     ):
-        if messages and isinstance(messages[0], BaseMessage):
-            messages = self.convert_messages_to_dicts(messages)
-
-        model = kwargs.pop("model", None)
+        model, messages_to_send = self._prepare_call(messages, kwargs)
 
         response = await self.client.achat(
             model=model,
-            messages=messages,
+            messages=messages_to_send,
             stream=stream,
             **kwargs,
         )
 
         if return_raw or stream:
             return response
-        if not response.choices or response.choices[0].message.content is None:
-            raise ValueError("LLM 返回了空的 choices 或 content，请检查模型服务")
-        return response.choices[0].message.content
+        return extract_text_response(response)

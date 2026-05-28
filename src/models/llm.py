@@ -14,7 +14,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Union, cast
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage
 from langfuse.decorators import langfuse_context, observe
 from langfuse.openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletionMessageParam
@@ -22,6 +22,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from src.configs.logger_config import setup_logger
 from src.configs.model_config import LLMConfig
 from src.models.message_adapter import MessageAdapter
+from src.models.response_utils import extract_text_response
 
 logger = setup_logger(__name__)
 
@@ -79,17 +80,22 @@ class OpenAICompatibleLLM(BaseLLM):
         next_extra_body.pop("chat_template_kwargs", None)
         return {**kwargs, "extra_body": next_extra_body}
 
+    def _prepare_request(
+        self, model: str, kwargs: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        return self._normalize_model(model), self._prepare_kwargs(kwargs)
+
     @observe(name="LLMWrapper.chat", as_type="generation")
     def chat(self, model: str, messages: List[dict], stream: bool = False, **kwargs):
         """与 OpenAI-compatible LLM 进行对话。"""
         typed_messages = cast(List[ChatCompletionMessageParam], messages)
-        normalized_model = self._normalize_model(model)
+        normalized_model, prepared_kwargs = self._prepare_request(model, kwargs)
         try:
             response = self.client.chat.completions.create(
                 model=normalized_model,
                 messages=typed_messages,
                 stream=stream,
-                **self._prepare_kwargs(kwargs),
+                **prepared_kwargs,
             )
             self.logger.info("成功获取模型响应")
             return response
@@ -103,13 +109,13 @@ class OpenAICompatibleLLM(BaseLLM):
     ):
         """与 OpenAI-compatible LLM 进行异步对话。"""
         typed_messages = cast(List[ChatCompletionMessageParam], messages)
-        normalized_model = self._normalize_model(model)
+        normalized_model, prepared_kwargs = self._prepare_request(model, kwargs)
         try:
             response = await self.aclient.chat.completions.create(
                 model=normalized_model,
                 messages=typed_messages,
                 stream=stream,
-                **self._prepare_kwargs(kwargs),
+                **prepared_kwargs,
             )
             self.logger.info("成功获取模型异步响应")
             return response
@@ -172,19 +178,6 @@ class LLMWrapper:
             self.logger.warning(f"LLM 语义缓存初始化失败: {e}")
             self._cache = None
 
-    def _extract_last_user_message(
-        self, messages: List[Union[Dict, BaseMessage]]
-    ) -> Optional[str]:
-        """从 messages 中提取最后一个 user message 的 content。"""
-        if not messages:
-            return None
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                return str(msg.content)
-            if isinstance(msg, dict) and msg.get("role") == "user":
-                return str(msg.get("content", ""))
-        return None
-
     def convert_messages_to_dicts(self, messages: List[BaseMessage]) -> List[Dict]:
         return MessageAdapter.to_openai_messages(messages)
 
@@ -245,10 +238,6 @@ class LLMWrapper:
             return response
         return {"content": str(response)}
 
-    def _deserialize_response(self, data: dict):
-        """将 dict 反序列化为 LLM 响应对象。"""
-        return data
-
     def _store_cache_sync(self, cache_key: str, response_data: dict) -> None:
         if not self._cache:
             return
@@ -280,6 +269,35 @@ class LLMWrapper:
         if self._cache:
             await self._cache.aset(cache_key, response_data)
 
+    def _prepare_call(
+        self,
+        messages: List[Union[Dict, BaseMessage]],
+        kwargs: dict[str, Any],
+    ) -> tuple[str, list[dict[str, Any]], str, dict[str, Any]]:
+        call_kwargs = dict(kwargs)
+        model = call_kwargs.pop("model", self.config.model)
+        messages_to_send = self._normalize_messages(messages)
+        cache_key = self._build_cache_key(model, messages_to_send, call_kwargs)
+        return model, messages_to_send, cache_key, call_kwargs
+
+    def _get_cached_text_sync(self, cache_key: str) -> str | None:
+        cached = self._get_cache_sync(cache_key)
+        if not cached:
+            return None
+        self.logger.info("LLM 缓存命中")
+        self._last_cache_hit = True
+        return self._read_cached_response(cached)
+
+    async def _get_cached_text_async(self, cache_key: str) -> str | None:
+        if not self._cache:
+            return None
+        cached = await self._cache.aget(cache_key)
+        if not cached:
+            return None
+        self.logger.info("LLM 缓存命中")
+        self._last_cache_hit = True
+        return self._read_cached_response(cached)
+
     def _read_cached_response(self, response_data: dict):
         if not response_data.get("choices") or not response_data["choices"][0].get(
             "message", {}
@@ -295,17 +313,15 @@ class LLMWrapper:
         **kwargs,
     ):
         self._last_cache_hit = False
-        model = kwargs.pop("model", self.config.model)
-        messages_to_send = self._normalize_messages(messages)
-        cache_key = self._build_cache_key(model, messages_to_send, kwargs)
+        model, messages_to_send, cache_key, call_kwargs = self._prepare_call(
+            messages, kwargs
+        )
 
-        if self._should_use_cache(stream, return_raw, kwargs):
+        if self._should_use_cache(stream, return_raw, call_kwargs):
             try:
-                cached = self._get_cache_sync(cache_key)
-                if cached:
-                    self.logger.info("LLM 缓存命中")
-                    self._last_cache_hit = True
-                    return self._read_cached_response(cached)
+                cached_text = self._get_cached_text_sync(cache_key)
+                if cached_text is not None:
+                    return cached_text
             except Exception as e:
                 self.logger.warning(f"LLM 缓存查询异常: {e}")
 
@@ -313,17 +329,14 @@ class LLMWrapper:
             model=model,
             messages=messages_to_send,
             stream=stream,
-            **kwargs,
+            **call_kwargs,
         )
 
         if return_raw or stream:
             return response
 
-        if not response.choices or response.choices[0].message.content is None:
-            raise ValueError("LLM 返回了空的 choices 或 content，请检查模型服务")
-
-        result = response.choices[0].message.content
-        if self._should_use_cache(stream, return_raw, kwargs):
+        result = extract_text_response(response)
+        if self._should_use_cache(stream, return_raw, call_kwargs):
             try:
                 self._store_cache_sync(cache_key, self._serialize_response(response))
             except Exception as e:
@@ -345,17 +358,15 @@ class LLMWrapper:
     ):
         """与 LLM 进行异步对话。"""
         self._last_cache_hit = False
-        model = kwargs.pop("model", self.config.model)
-        messages_to_send = self._normalize_messages(messages)
-        cache_key = self._build_cache_key(model, messages_to_send, kwargs)
+        model, messages_to_send, cache_key, call_kwargs = self._prepare_call(
+            messages, kwargs
+        )
 
-        if self._should_use_cache(stream, return_raw, kwargs):
+        if self._should_use_cache(stream, return_raw, call_kwargs):
             try:
-                cached = await self._cache.aget(cache_key)
-                if cached:
-                    self.logger.info("LLM 缓存命中")
-                    self._last_cache_hit = True
-                    return self._read_cached_response(cached)
+                cached_text = await self._get_cached_text_async(cache_key)
+                if cached_text is not None:
+                    return cached_text
             except Exception as e:
                 self.logger.warning(f"LLM 缓存查询异常: {e}")
 
@@ -364,19 +375,18 @@ class LLMWrapper:
             messages=messages_to_send,
             stream=stream,
             return_raw=True,
-            **kwargs,
+            **call_kwargs,
         )
 
         if return_raw or stream:
             return response
 
-        if not response.choices or response.choices[0].message.content is None:
-            raise ValueError("LLM 返回了空的 choices 或 content，请检查模型服务")
-
-        result = response.choices[0].message.content
-        if self._should_use_cache(stream, return_raw, kwargs):
+        result = extract_text_response(response)
+        if self._should_use_cache(stream, return_raw, call_kwargs):
             try:
-                await self._store_cache_async(cache_key, self._serialize_response(response))
+                await self._store_cache_async(
+                    cache_key, self._serialize_response(response)
+                )
             except Exception as e:
                 self.logger.warning(f"LLM 缓存存储异常: {e}")
 
