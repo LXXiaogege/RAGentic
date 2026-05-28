@@ -108,6 +108,20 @@ class TestQAPipelineNodes:
         assert "工具结果" in result.final_context or "文档 1" in result.final_context
 
     @pytest.mark.asyncio
+    async def test_load_memory_context_prefetches_ltm(self, config, mock_components):
+        """测试路由后会预加载长期记忆上下文"""
+        config.retrieve.use_memory = True
+        pipeline = create_pipeline_with_mocks(config)
+        pipeline._memory_settings.enable_ltm = True
+        pipeline._search_memory_context = AsyncMock(return_value="【长期记忆】用户偏好")
+
+        state = QAState(original_query="测试")
+        result = await pipeline._load_memory_context(state)
+
+        pipeline._search_memory_context.assert_awaited_once_with("测试")
+        assert result.memory_context == "【长期记忆】用户偏好"
+
+    @pytest.mark.asyncio
     async def test_build_context_light_rag_searches_kb(self, config, mock_components):
         """测试轻 RAG 路径会先构建 KB 上下文"""
         config.retrieve.use_kb = True
@@ -205,8 +219,8 @@ class TestQAPipelineConditionalEdges:
 
         state_max_iterations = QAState(original_query="测试", agent_iteration=5)
         result = pipeline._should_continue_agent_loop(state_max_iterations)
-        assert result == "error"
-        assert "最大工具调用轮数" in state_max_iterations.error
+        assert result == "fallback_answer"
+        assert "最大工具调用轮数" in state_max_iterations.agent_stop_reason
 
     def test_should_generate_answer_agent_completed(self, config):
         """测试生成答案判断 - agent 已完成"""
@@ -229,7 +243,7 @@ class TestQAPipelineConditionalEdges:
             agent_used_tools=False,
         )
         result = pipeline._should_generate_answer(state)
-        assert result == "generate_answer"
+        assert result == "need_answer"
 
     def test_should_generate_answer_no_agent(self, config):
         """测试生成答案判断 - 无 agent 循环"""
@@ -237,7 +251,7 @@ class TestQAPipelineConditionalEdges:
 
         state = QAState(original_query="测试", agent_iteration=0)
         result = pipeline._should_generate_answer(state)
-        assert result == "generate_answer"
+        assert result == "need_answer"
 
     def test_should_continue_agent_loop_max_iterations_sets_error(self, config):
         """测试达到最大迭代次数时给出可解释错误"""
@@ -247,8 +261,8 @@ class TestQAPipelineConditionalEdges:
         state = QAState(original_query="测试", agent_iteration=2)
         result = pipeline._should_continue_agent_loop(state)
 
-        assert result == "error"
-        assert "最大工具调用轮数" in state.error
+        assert result == "fallback_answer"
+        assert "最大工具调用轮数" in state.agent_stop_reason
 
 
 class TestQAPipelineIntegration:
@@ -272,9 +286,12 @@ class TestQAPipelineIntegration:
             assert pipeline.graph is not None
             graph_text = pipeline.graph.get_graph().draw_mermaid()
             assert "route_query" in graph_text
+            assert "load_memory_context" in graph_text
             assert "agent_node" in graph_text
             assert "build_context" in graph_text
             assert "tools_node" in graph_text
+            assert "need_answer" in graph_text
+            assert "fallback_answer" in graph_text
 
     def test_export_graph(self, config):
         """测试图导出"""

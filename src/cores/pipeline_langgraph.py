@@ -72,9 +72,11 @@ class QAState(BaseModel):
 
     kb_context: Optional[str] = None
     tool_context: Optional[str] = None
+    memory_context: Optional[str] = None
     final_context: Optional[str] = None
 
     error: Optional[str] = None
+    agent_stop_reason: Optional[str] = None
 
     agent_iteration: int = 0
     tool_calls_history: List[Dict[str, Any]] = Field(default_factory=list)
@@ -108,8 +110,9 @@ def build_prompt_messages(
             f"原始问题：{state.original_query}\n转换后的问题：{state.transformed_query}"
         )
 
-    if state.final_context:
-        query_content = f"上下文信息：\n{state.final_context}\n\n问题：{query_content}"
+    context_text = state.final_context or state.memory_context
+    if context_text:
+        query_content = f"上下文信息：\n{context_text}\n\n问题：{query_content}"
 
     messages.append(HumanMessage(content=query_content))
 
@@ -241,6 +244,7 @@ class LangGraphQAPipeline:
         workflow.add_node("update_memory", self._update_memory)
         workflow.add_node("handle_error", self._handle_error)
         workflow.add_node("route_query", self._route_query)
+        workflow.add_node("load_memory_context", self._load_memory_context)
 
         self._define_workflow(workflow)
         self.graph = workflow.compile(checkpointer=self.checkpointer)
@@ -248,9 +252,10 @@ class LangGraphQAPipeline:
     def _define_workflow(self, workflow: StateGraph):
         """定义工作流程"""
         workflow.add_edge(START, "route_query")
+        workflow.add_edge("route_query", "load_memory_context")
 
         workflow.add_conditional_edges(
-            "route_query",
+            "load_memory_context",
             self._should_call_tools,
             {
                 "call_agent": "agent_node",
@@ -265,6 +270,7 @@ class LangGraphQAPipeline:
             {
                 "has_tool_calls": "tools_node",
                 "done": "build_context",
+                "fallback_answer": "build_context",
                 "error": "handle_error",
             },
         )
@@ -274,8 +280,8 @@ class LangGraphQAPipeline:
             "build_context",
             self._should_generate_answer,
             {
-                "generate_answer": "generate_answer",
-                "skip_generate": "update_memory",
+                "need_answer": "generate_answer",
+                "persist_without_answer": "update_memory",
                 "finish": END,
                 "error": "handle_error",
             },
@@ -284,7 +290,7 @@ class LangGraphQAPipeline:
         workflow.add_conditional_edges(
             "generate_answer",
             self._should_update_memory,
-            {"update_memory": "update_memory", "finish": END, "error": "handle_error"},
+            {"persist_memory": "update_memory", "finish": END, "error": "handle_error"},
         )
 
         workflow.add_edge("update_memory", END)
@@ -293,6 +299,43 @@ class LangGraphQAPipeline:
     async def _route_query(self, state: QAState) -> QAState:
         """入口路由节点：保留一个显式节点方便测试与追踪。"""
         return state
+
+    @langfuse_context.observe(name="pipeline._load_memory_context")
+    @timing_decorator
+    async def _load_memory_context(self, state: QAState) -> QAState:
+        """在路由后预加载长期记忆，使 Agent 首轮也能看到个性化上下文。"""
+        if not self.config.retrieve.use_memory or not self._memory_settings.enable_ltm:
+            return state
+
+        memory_context = await self._search_memory_context(state.original_query)
+        if memory_context:
+            state.memory_context = memory_context
+            self.logger.info(f"预加载长期记忆上下文，长度：{len(memory_context)}")
+        return state
+
+    async def _search_memory_context(self, query: str) -> str:
+        """搜索长期记忆并格式化为上下文；失败时降级为空字符串。"""
+        await self._ensure_memory_initialized()
+        if not self._memory_service or not self._memory_service.is_initialized:
+            return ""
+
+        try:
+            ltm_results = await self._memory_service.search(
+                query=query,
+                user_id=self.config.retrieve.user_id or "default",
+                limit=self._memory_settings.ltm_search_limit,
+                threshold=self._memory_settings.ltm_search_threshold,
+            )
+            if not ltm_results:
+                return ""
+            self.logger.info(f"搜索到 {len(ltm_results)} 条长期记忆")
+            return self._memory_service.format_ltm_for_context(
+                ltm_results,
+                prefix="【长期记忆】",
+            )
+        except Exception as e:
+            self.logger.warning(f"搜索长期记忆失败: {e}")
+            return ""
 
     def _should_call_tools(self, state: QAState) -> str:
         """根据请求配置选择重 Agent 路径或轻 RAG 路径。"""
@@ -809,6 +852,10 @@ class LangGraphQAPipeline:
 
             context_parts = []
 
+            if state.agent_stop_reason:
+                context_parts.append(f"【Agent状态】\n{state.agent_stop_reason}")
+                self.logger.info("[BUILD_CONTEXT]   added agent_stop_reason")
+
             if state.tool_context:
                 context_parts.append(state.tool_context)
                 self.logger.info(
@@ -840,26 +887,16 @@ class LangGraphQAPipeline:
                 except Exception as e:
                     self.logger.warning(f"[BUILD_CONTEXT]   kb search failed: {e}")
 
-            if self.config.retrieve.use_memory and self._memory_settings.enable_ltm:
-                await self._ensure_memory_initialized()
-                if self._memory_service and self._memory_service.is_initialized:
-                    try:
-                        ltm_results = await self._memory_service.search(
-                            query=state.original_query,
-                            user_id=self.config.retrieve.user_id or "default",
-                            limit=self._memory_settings.ltm_search_limit,
-                            threshold=self._memory_settings.ltm_search_threshold,
-                        )
-                        if ltm_results:
-                            ltm_context = self._memory_service.format_ltm_for_context(
-                                ltm_results, prefix="【长期记忆】"
-                            )
-                            context_parts.append(ltm_context)
-                            self.logger.info(
-                                f"添加 {len(ltm_results)} 条长期记忆到上下文"
-                            )
-                    except Exception as e:
-                        self.logger.warning(f"搜索长期记忆失败: {e}")
+            if state.memory_context:
+                context_parts.append(state.memory_context)
+                self.logger.info(
+                    f"[BUILD_CONTEXT]   added memory_context, len={len(state.memory_context)}"
+                )
+            elif self.config.retrieve.use_memory and self._memory_settings.enable_ltm:
+                memory_context = await self._search_memory_context(state.original_query)
+                if memory_context:
+                    state.memory_context = memory_context
+                    context_parts.append(memory_context)
 
             state.final_context = "\n\n".join(context_parts)
             self.logger.info(f"上下文构建完成，长度：{len(state.final_context)}")
@@ -947,14 +984,14 @@ class LangGraphQAPipeline:
             return "error"
 
         if state.agent_iteration >= self.config.retrieve.max_agent_iterations:
-            state.error = (
+            state.agent_stop_reason = (
                 f"Agent 达到最大工具调用轮数 "
-                f"({self.config.retrieve.max_agent_iterations})，已停止以避免循环调用"
+                f"({self.config.retrieve.max_agent_iterations})，将基于已获得的信息生成降级回答"
             )
             self.logger.warning(
-                "[LOOP_CHECK] <<< MAX ITERATIONS REACHED, returning 'error'"
+                "[LOOP_CHECK] <<< MAX ITERATIONS REACHED, returning 'fallback_answer'"
             )
-            return "error"
+            return "fallback_answer"
 
         last_ai = None
         for m in reversed(state.messages):
@@ -989,8 +1026,8 @@ class LangGraphQAPipeline:
         if state.agent_iteration > 0:
             if state.agent_used_tools or state.tool_calls_history:
                 if self.config.retrieve.use_memory:
-                    self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'skip_generate'")
-                    return "skip_generate"
+                    self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'persist_without_answer'")
+                    return "persist_without_answer"
                 self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'finish'")
                 return "finish"
 
@@ -998,16 +1035,16 @@ class LangGraphQAPipeline:
                 self.logger.info(
                     "[GEN_ANSWER_CHECK] <<< returning 'generate_answer' for context-backed final answer"
                 )
-                return "generate_answer"
+                return "need_answer"
 
             if self.config.retrieve.use_memory:
-                self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'skip_generate'")
-                return "skip_generate"
+                self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'persist_without_answer'")
+                return "persist_without_answer"
             self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'finish'")
             return "finish"
 
-        self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'generate_answer'")
-        return "generate_answer"
+        self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'need_answer'")
+        return "need_answer"
 
     def _should_update_memory(self, state: QAState) -> str:
         """判断是否需要更新记忆"""
@@ -1015,7 +1052,7 @@ class LangGraphQAPipeline:
             return "error"
 
         if self.config.retrieve.use_memory:
-            return "update_memory"
+            return "persist_memory"
         else:
             return "finish"
 
