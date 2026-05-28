@@ -18,6 +18,7 @@ from src.configs.retrieve_config import SearchConfig
 from src.db_services.milvus.collection_manager import MilvusCollectionManager
 from src.db_services.milvus.data_service import MilvusDataService
 from src.db_services.milvus.database_manager import MilvusDBManager
+from src.db_services.milvus.record_utils import create_default_schema
 
 logger = setup_logger(__name__)
 
@@ -179,38 +180,7 @@ class MilvusConnectionManager:
 
     def _create_default_schema(self) -> dict:
         """创建默认的集合 schema"""
-        return {
-            "auto_id": False,
-            "enable_dynamic_fields": False,
-            "fields": [
-                {
-                    "name": "id",
-                    "dtype": "VARCHAR",
-                    "max_length": 64,
-                    "is_primary": True,
-                },
-                {
-                    "name": "dense_vec",
-                    "dtype": "FLOAT_VECTOR",
-                    "dim": self.milvus_config.vector_dimension,
-                },
-                {
-                    "name": "bm25_vec",
-                    "dtype": "SPARSE_FLOAT_VECTOR",
-                    "drop_ratio_build": self.bm25_config.bm25_drop_ratio,
-                },
-                {
-                    "name": "text",
-                    "dtype": "VARCHAR",
-                    "max_length": self.milvus_config.max_text_length,
-                },
-                {
-                    "name": "metadata",
-                    "dtype": "VARCHAR",
-                    "max_length": self.milvus_config.max_metadata_length,
-                },
-            ],
-        }
+        return create_default_schema(self.milvus_config, self.bm25_config)
 
     # --- Data Level ---
     def load_bm25_model(self, texts: List[str]):

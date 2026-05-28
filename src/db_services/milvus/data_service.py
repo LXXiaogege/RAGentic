@@ -36,20 +36,16 @@ from src.configs.model_config import BM25Config, RerankConfig
 from src.configs.retrieve_config import SearchConfig
 from src.data_process.processor import DataProcessor
 from src.db_services.milvus.collection_manager import MilvusCollectionManager
+from src.db_services.milvus.record_utils import (
+    build_id_filter,
+    build_milvus_records,
+    prepare_document_parts,
+    split_records_by_existing_ids,
+)
 from src.models.embedding import TextEmbedding
 from src.utils.utils import get_text_hash
 
 logger = setup_logger(__name__)
-
-
-def truncate_by_bytes(text: str, max_bytes: int = 1024, encoding: str = "utf-8") -> str:
-    encoded = text.encode(encoding)
-    if len(encoded) <= max_bytes:
-        return text
-    # 找到截断位置
-    truncated = encoded[:max_bytes]
-    # 防止截断到一半的字符，decode 时加 errors='ignore'
-    return truncated.decode(encoding, errors="ignore")
 
 
 class MilvusDataService:
@@ -180,13 +176,7 @@ class MilvusDataService:
     def prepare_records(self, documents):
         """将文档转换为结构化记录和 ID, 从Langchain documents 改为milvus原生支持格式"""
         self.logger.info(f"开始准备 {len(documents)} 条文档记录...")
-        texts, meta_datas, ids = [], [], []
-        for doc in documents:
-            text = doc.page_content
-            text_hash = get_text_hash(text)
-            texts.append(text)
-            meta_datas.append(doc.metadata)
-            ids.append(text_hash)
+        texts, meta_datas, ids = prepare_document_parts(documents)
         self.logger.debug(f"文档记录准备完成，生成 {len(ids)} 条记录")
         return texts, meta_datas, ids
 
@@ -377,8 +367,7 @@ class MilvusDataService:
         if not ids:
             return []
         try:
-            quoted_ids = [f'"{id_}"' for id_ in ids]
-            filter_expr = f"id in [{', '.join(quoted_ids)}]"
+            filter_expr = build_id_filter(ids)
             results = self.client.query(
                 collection_name=self.milvus_config.collection_name,
                 filter=filter_expr,
@@ -410,8 +399,7 @@ class MilvusDataService:
         async def query_existing_ids(ids_list):
             if not ids_list:
                 return set()
-            quoted_ids = [f'"{id_}"' for id_ in ids_list]
-            filter_expr = f"id in [{', '.join(quoted_ids)}]"
+            filter_expr = build_id_filter(ids_list)
 
             try:
                 # 使用 asyncio.to_thread 封装同步 Milvus 查询
@@ -438,24 +426,18 @@ class MilvusDataService:
         bm25_vectors = await asyncio.to_thread(self._prepare_bm25_vectors, texts)
 
         # 5. 准备插入/更新数据 (CPU密集型，可同步)
-        insert_data, update_data = [], []
-        for id_, text, meta_data, dense_vector, bm25_vector in zip(
-            ids, texts, meta_datas, dense_vectors, bm25_vectors
-        ):
-            if dense_vector is None:
-                self.logger.warning(f"跳过文档 {id_}，因为嵌入向量生成失败")
-                continue
-            record = {
-                "id": id_,
-                "text": truncate_by_bytes(text, self.milvus_config.max_text_length),
-                "metadata": str(meta_data),
-                "dense_vec": dense_vector,
-                "bm25_vec": bm25_vector,
-            }
-            if id_ in existing_ids:
-                update_data.append(record)
-            else:
-                insert_data.append(record)
+        records = build_milvus_records(
+            ids=ids,
+            texts=texts,
+            metadatas=meta_datas,
+            dense_vectors=dense_vectors,
+            sparse_vectors=bm25_vectors,
+            config=self.milvus_config,
+        )
+        skipped_count = len(ids) - len(records)
+        if skipped_count:
+            self.logger.warning(f"跳过 {skipped_count} 条嵌入向量生成失败的文档")
+        insert_data, update_data = split_records_by_existing_ids(records, existing_ids)
 
         # 6. 异步插入和更新 (Milvus I/O 阻塞)
         def run_insert_update():

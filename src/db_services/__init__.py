@@ -16,8 +16,7 @@ from src.db_services.base import (
     SparseEncoder,
     VectorStore,
 )
-from src.db_services.factory import create_vector_store
-from src.db_services.milvus.store import MilvusVectorStore
+from src.db_services.milvus.connection_manager import MilvusConnectionManager
 
 __all__ = [
     "VectorStore",
@@ -25,6 +24,5 @@ __all__ = [
     "SearchResult",
     "DenseEncoder",
     "SparseEncoder",
-    "create_vector_store",
-    "MilvusVectorStore",
+    "MilvusConnectionManager",
 ]

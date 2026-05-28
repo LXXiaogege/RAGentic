@@ -9,16 +9,14 @@ milvus 子模块
 Milvus 向量库实现
 """
 
-from src.db_services.milvus.collection import MilvusCollectionManager
-from src.db_services.milvus.connection import MilvusConnection
-from src.db_services.milvus.data import MilvusDataService
-from src.db_services.milvus.retrieval import HybridRetrievalPipeline
-from src.db_services.milvus.store import MilvusVectorStore
+from src.db_services.milvus.collection_manager import MilvusCollectionManager
+from src.db_services.milvus.connection_manager import MilvusConnectionManager
+from src.db_services.milvus.data_service import MilvusDataService
+from src.db_services.milvus.database_manager import MilvusDBManager
 
 __all__ = [
-    "MilvusVectorStore",
-    "MilvusConnection",
+    "MilvusConnectionManager",
+    "MilvusDBManager",
     "MilvusCollectionManager",
     "MilvusDataService",
-    "HybridRetrievalPipeline",
 ]
