@@ -2,6 +2,7 @@
 """安全模块单元测试"""
 
 from src.utils.security import SecurityManager
+from src.configs.config import AppConfig
 
 
 class TestSecurityManager:
@@ -134,6 +135,19 @@ class TestSecurityManager:
             is_valid, error_msg = manager.validate_query(query)
             assert is_valid is True
             assert error_msg == ""
+
+    def test_app_config_repr_redacts_secret_fields(self):
+        """测试配置 repr 不泄露明文密钥"""
+        config = AppConfig()
+        config.llm.api_key = "sk-visible-llm-secret"
+        config.embedding.api_key = "sk-visible-embedding-secret"
+        config.langfuse.secret_key = "sk-visible-langfuse-secret"
+
+        rendered = repr(config)
+
+        assert "sk-visible-llm-secret" not in rendered
+        assert "sk-visible-embedding-secret" not in rendered
+        assert "sk-visible-langfuse-secret" not in rendered
 
 
 class TestSecurityManagerIntegration:

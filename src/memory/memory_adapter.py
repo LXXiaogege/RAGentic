@@ -72,8 +72,11 @@ def adapt_appconfig_to_mem0(app_config: AppConfig) -> Dict[str, Any]:
     vector_store_cfg = VectorStoreConfig(
         provider="milvus", config=app_vector_store_to_mem0_dict(app_config.milvus)
     )
+    llm_provider = app_config.llm.provider
+    if llm_provider in {"minimax", "litellm"}:
+        llm_provider = "openai"
     llm_cfg = LlmConfig(
-        provider=app_config.llm.provider, config=app_llm_to_mem0_dict(app_config.llm)
+        provider=llm_provider, config=app_llm_to_mem0_dict(app_config.llm)
     )
     embedder_cfg = EmbedderConfig(
         provider="openai",

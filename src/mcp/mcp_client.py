@@ -75,7 +75,7 @@ class MCPClient:
         logger.debug(f"Using command: {command}")
 
         server_params = StdioServerParameters(
-            command=command, args=["run", server_script_path], env=None
+            command=command, args=args, env=None
         )
 
         self.exit_stack = AsyncExitStack()
@@ -122,7 +122,9 @@ class MCPClient:
         async def call_single_tool(tool_call):
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
-            logger.info(f"Calling tool: {tool_name} with args: {tool_args}")
+            logger.info(
+                f"Calling tool: {tool_name} with args_len={len(str(tool_args))}"
+            )
             try:
                 tool_result = await self.session.call_tool(tool_name, tool_args)
                 if not tool_result.isError and tool_result.content:

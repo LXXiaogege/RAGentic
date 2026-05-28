@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 class LangfuseConfig(BaseModel):
     host: str = Field(default="", description="Langfuse host URL")
     public_key: str = Field(default="", description="Langfuse public key")
-    secret_key: str = Field(default="", description="Langfuse secret key")
+    secret_key: str = Field(default="", repr=False, description="Langfuse secret key")
     LANGFUSE_TRACING_ENVIRONMENT: str = Field(
         default="testing", description="Langfuse 环境"
     )

@@ -17,6 +17,7 @@ from src.configs.logger_config import setup_logger
 from src.memory.base import MemoryService
 from src.memory.long_term_memory import LongTermMemory
 from src.memory.short_term_memory import ShortTermMemory
+from src.configs.memory_settings import MemorySettings
 
 logger = setup_logger(__name__)
 
@@ -39,6 +40,7 @@ class HybridMemoryService(MemoryService):
         ltm_persist_threshold: int = 3,
         enable_stm: bool = True,
         enable_ltm: bool = True,
+        memory_settings: Optional[MemorySettings] = None,
     ):
         self.config = config
         self.user_id = user_id
@@ -54,11 +56,14 @@ class HybridMemoryService(MemoryService):
 
         self._conversation_count = 0
         self._pending_stm_messages: List[Dict[str, str]] = []
+        self._persisted_message_keys: set[tuple[str, str]] = set()
 
-        # 加载 MemorySettings（包含 max_memories, memory_ttl_days）
-        from src.configs.memory_settings import MemorySettings
-
-        memory_settings = MemorySettings()
+        memory_settings = memory_settings or MemorySettings(
+            stm_window_size=stm_window_size,
+            ltm_persist_threshold=ltm_persist_threshold,
+            enable_stm=enable_stm,
+            enable_ltm=enable_ltm,
+        )
         self.max_memories = memory_settings.max_memories
         self.memory_ttl_days = memory_settings.memory_ttl_days
 
@@ -291,6 +296,14 @@ class HybridMemoryService(MemoryService):
         if not messages:
             return {"results": [], "stm_count": 0, "ltm_persisted": False}
 
+        messages = self._dedupe_new_messages(messages)
+        if not messages:
+            return {
+                "results": [],
+                "stm_count": len(self._pending_stm_messages),
+                "ltm_persisted": False,
+            }
+
         if self.enable_stm:
             stm = self._ensure_stm()
             stm.add(messages)
@@ -318,6 +331,8 @@ class HybridMemoryService(MemoryService):
                     **kwargs,
                 )
                 result["results"] = ltm_result.get("results", [])
+                for msg in self._pending_stm_messages:
+                    self._persisted_message_keys.add(self._message_key(msg))
                 self._pending_stm_messages.clear()
                 ltm_persisted = True
                 self._conversation_count += 1
@@ -335,6 +350,29 @@ class HybridMemoryService(MemoryService):
 
         result["ltm_persisted"] = ltm_persisted
         return result
+
+    def _message_key(self, message: Dict[str, str]) -> tuple[str, str]:
+        return (
+            str(message.get("role", "")),
+            str(message.get("content", "")).strip(),
+        )
+
+    def _dedupe_new_messages(
+        self,
+        messages: List[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        pending_keys = {self._message_key(msg) for msg in self._pending_stm_messages}
+        filtered = []
+        seen_in_batch: set[tuple[str, str]] = set()
+        for msg in messages:
+            key = self._message_key(msg)
+            if not key[1] or key in self._persisted_message_keys:
+                continue
+            if key in pending_keys or key in seen_in_batch:
+                continue
+            filtered.append(msg)
+            seen_in_batch.add(key)
+        return filtered
 
     async def search(
         self,
@@ -467,6 +505,8 @@ class HybridMemoryService(MemoryService):
                 **kwargs,
             )
             count = len(self._pending_stm_messages)
+            for msg in self._pending_stm_messages:
+                self._persisted_message_keys.add(self._message_key(msg))
             self._pending_stm_messages.clear()
             self._conversation_count += 1
             logger.info(f"强制刷写 {count} 条消息到 LTM")

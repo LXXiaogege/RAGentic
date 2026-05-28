@@ -114,7 +114,7 @@ class LongTermMemory:
             threshold=threshold,
             filters=kwargs.get("filters"),
         )
-        results = result.get("results", [])
+        results = result.get("results", []) if isinstance(result, dict) else result
         logger.debug(
             f"搜索长期记忆，用户: {final_user_id}，查询: {query}，结果数: {len(results)}"
         )

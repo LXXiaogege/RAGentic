@@ -22,7 +22,7 @@ class Mem0Manager:
         """
         self.config = adapt_appconfig_to_mem0(config)
         self.m: Optional[AsyncMemory] = None
-        self.default_user_id = user_id
+        self.default_user_id = user_id or "default"
 
     def _ensure_initialized(self):
         """确保 Memory 客户端已初始化"""
@@ -160,7 +160,7 @@ class Mem0Manager:
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
         删除指定范围内的所有记忆
 
@@ -211,10 +211,10 @@ class Mem0Manager:
             threshold: 相似度阈值 (可选)
 
         Returns:
-            dict: 搜索结果，包含 "results" 键
+            List[Dict[str, Any]]: 搜索结果列表
         """
         self._ensure_initialized()
-        return await self.m.search(
+        res = await self.m.search(
             query=query,
             user_id=self._get_user_id(user_id),
             agent_id=agent_id,
@@ -223,3 +223,6 @@ class Mem0Manager:
             filters=filters,
             threshold=threshold,
         )
+        if isinstance(res, dict):
+            return res.get("results", [])
+        return res or []

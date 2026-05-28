@@ -25,7 +25,7 @@ from langfuse.decorators import langfuse_context
 from langgraph.graph import END, START, StateGraph, add_messages
 
 from src.cores.bounded_memory_saver import BoundedMemorySaver
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.configs.config import AppConfig
 from src.configs.logger_config import setup_logger
@@ -62,7 +62,7 @@ def timing_decorator(func: Callable) -> Callable:
 class QAState(BaseModel):
     """QA Pipeline的状态定义"""
 
-    messages: Annotated[List[Any], add_messages] = []
+    messages: Annotated[List[Any], add_messages] = Field(default_factory=list)
     original_query: str
     transformed_query: Optional[str] = None
 
@@ -77,11 +77,13 @@ class QAState(BaseModel):
     error: Optional[str] = None
 
     agent_iteration: int = 0
-    tool_calls_history: List[Dict[str, Any]] = []
+    tool_calls_history: List[Dict[str, Any]] = Field(default_factory=list)
 
     cache_hit: Optional[bool] = None
     hyde_vector: Optional[List[float]] = None
     stream: bool = False
+    agent_used_tools: bool = False
+    initial_message_count: int = 0
 
 
 def build_prompt_messages(
@@ -156,6 +158,7 @@ class LangGraphQAPipeline:
         self._mcp_client: Optional[MCPClient] = None
         self._mcp_connected = False
         self._mcp_tools_cache: list = []
+        self._mcp_init_lock = asyncio.Lock()
 
         self.skill_manager = SkillManager(self.config.prompt.skills_dir)
 
@@ -199,7 +202,7 @@ class LangGraphQAPipeline:
         if self._mcp_connected and self._mcp_client is not None:
             return self._mcp_client
 
-        async with self._memory_init_lock:
+        async with self._mcp_init_lock:
             if self._mcp_connected and self._mcp_client is not None:
                 return self._mcp_client
 
@@ -237,13 +240,24 @@ class LangGraphQAPipeline:
         workflow.add_node("generate_answer", self._generate_answer)
         workflow.add_node("update_memory", self._update_memory)
         workflow.add_node("handle_error", self._handle_error)
+        workflow.add_node("route_query", self._route_query)
 
         self._define_workflow(workflow)
         self.graph = workflow.compile(checkpointer=self.checkpointer)
 
     def _define_workflow(self, workflow: StateGraph):
         """定义工作流程"""
-        workflow.add_edge(START, "agent_node")
+        workflow.add_edge(START, "route_query")
+
+        workflow.add_conditional_edges(
+            "route_query",
+            self._should_call_tools,
+            {
+                "call_agent": "agent_node",
+                "skip_tools": "build_context",
+                "error": "handle_error",
+            },
+        )
 
         workflow.add_conditional_edges(
             "agent_node",
@@ -276,6 +290,16 @@ class LangGraphQAPipeline:
         workflow.add_edge("update_memory", END)
         workflow.add_edge("handle_error", END)
 
+    async def _route_query(self, state: QAState) -> QAState:
+        """入口路由节点：保留一个显式节点方便测试与追踪。"""
+        return state
+
+    def _should_call_tools(self, state: QAState) -> str:
+        """根据请求配置选择重 Agent 路径或轻 RAG 路径。"""
+        if state.error:
+            return "error"
+        return "call_agent" if self.config.retrieve.use_tool else "skip_tools"
+
 
     @langfuse_context.observe(name="pipeline._agent_node")
     @timing_decorator
@@ -290,8 +314,10 @@ class LangGraphQAPipeline:
             )
 
             for i, msg in enumerate(state.messages):
-                self.logger.info(
-                    f"[AGENT_NODE]   state.messages[{i}] {type(msg).__name__}: content={str(msg.content)[:80] if msg.content else ''}..., tool_calls={getattr(msg, 'tool_calls', None)}"
+                self.logger.debug(
+                    f"[AGENT_NODE]   state.messages[{i}] {type(msg).__name__}: "
+                    f"content_len={len(str(msg.content)) if msg.content else 0}, "
+                    f"has_tool_calls={bool(getattr(msg, 'tool_calls', None))}"
                 )
 
             if self.config.retrieve.use_tool:
@@ -327,13 +353,16 @@ class LangGraphQAPipeline:
                 )
                 for i, msg in enumerate(messages):
                     tc = getattr(msg, "tool_calls", None)
-                    self.logger.info(
-                        f"[AGENT_NODE]   msg[{i}] {type(msg).__name__}: content={str(msg.content)[:100] if msg.content else ''}..., tool_calls={tc}, tc_type={type(tc)}"
+                    self.logger.debug(
+                        f"[AGENT_NODE]   msg[{i}] {type(msg).__name__}: "
+                        f"content_len={len(str(msg.content)) if msg.content else 0}, "
+                        f"tool_calls_count={len(tc) if isinstance(tc, list) else 0}, "
+                        f"tc_type={type(tc)}"
                     )
                     if tc:
                         for j, t in enumerate(tc):
                             self.logger.info(
-                                f"[AGENT_NODE]     tc[{j}]: type={type(t)}, value={t}"
+                                f"[AGENT_NODE]     tc[{j}]: type={type(t)}"
                             )
 
             extra_body = self.config.retrieve.extra_body
@@ -376,7 +405,8 @@ class LangGraphQAPipeline:
                 # 非流式模式
                 raw_message = response.choices[0].message
             self.logger.info(
-                f"[AGENT_NODE]   LLM response: content={str(raw_message.content)[:200] if raw_message.content else 'None'}, tool_calls={raw_message.tool_calls}"
+                f"[AGENT_NODE]   LLM response: content_len={len(str(raw_message.content)) if raw_message.content else 0}, "
+                f"tool_calls_count={len(raw_message.tool_calls) if raw_message.tool_calls else 0}"
             )
 
             if openai_tools and raw_message.tool_calls:
@@ -393,10 +423,10 @@ class LangGraphQAPipeline:
                         getattr(tc_func, "arguments", None) if tc_func else "N/A"
                     )
                     self.logger.info(
-                        f"[AGENT_NODE]   tc: type={tc_type}, id={tc_id}, func_name={func_name}, func_args_raw type={type(func_args_raw).__name__}, func_args_raw={func_args_raw}"
+                        f"[AGENT_NODE]   tc: type={tc_type}, id={tc_id}, func_name={func_name}, func_args_raw type={type(func_args_raw).__name__}"
                     )
-                    self.logger.info(
-                        f"[AGENT_NODE]   tc: type={tc_type}, id={tc_id}, function.name={func_name}, function.arguments={func_args_raw}"
+                    self.logger.debug(
+                        f"[AGENT_NODE]   tc: type={tc_type}, id={tc_id}, function.name={func_name}, args_len={len(str(func_args_raw)) if func_args_raw else 0}"
                     )
                     try:
                         if func_args_raw is None:
@@ -409,7 +439,7 @@ class LangGraphQAPipeline:
                             args = {"raw": str(args)}
                     except Exception as e:
                         self.logger.warning(
-                            f"[AGENT_NODE]   json parse error: {e}, raw_args: {func_args_raw}"
+                            f"[AGENT_NODE]   json parse error: {e}, raw_args_len={len(str(func_args_raw)) if func_args_raw else 0}"
                         )
                         args = {"raw": str(func_args_raw)}
                     lc_tool_calls.append(
@@ -431,7 +461,7 @@ class LangGraphQAPipeline:
                 state.agent_iteration += 1
                 self.logger.info(
                     f"[AGENT_NODE]   <<< HAS TOOL_CALLS: {[tc['name'] for tc in lc_tool_calls]}, "
-                    f"args={[tc['args'] for tc in lc_tool_calls]}"
+                    f"count={len(lc_tool_calls)}"
                 )
             else:
                 answer_content = raw_message.content or ""
@@ -439,7 +469,7 @@ class LangGraphQAPipeline:
                 state.messages += [ai_msg]
                 state.agent_iteration += 1
                 self.logger.info(
-                    f"[AGENT_NODE]   <<< NO TOOL_CALLS, answer={str(answer_content)[:200]}..."
+                    f"[AGENT_NODE]   <<< NO TOOL_CALLS, answer_len={len(str(answer_content))}"
                 )
                 if state.tool_calls_history:
                     tool_results = "\n".join(
@@ -521,8 +551,8 @@ class LangGraphQAPipeline:
                 f"[TOOLS_NODE] 执行 {len(tool_calls)} 个工具调用: {[tc['name'] for tc in tool_calls]}"
             )
             for tc in tool_calls:
-                self.logger.info(
-                    f"[TOOLS_NODE]   tool_call: {tc['name']}, id={tc['id']}, args={tc['args']}"
+                self.logger.debug(
+                    f"[TOOLS_NODE]   tool_call: {tc['name']}, id={tc['id']}, args_len={len(str(tc['args']))}"
                 )
 
             kb_tool_calls = []
@@ -604,7 +634,7 @@ class LangGraphQAPipeline:
                         args.get("query", "") if isinstance(args, dict) else str(args)
                     )
                     self.logger.info(
-                        f"[TOOLS_NODE]   KB [{query}] => {result[:100] if result else '(空)'}..."
+                        f"[TOOLS_NODE]   KB [{query}] => result_len={len(result) if result else 0}"
                     )
 
             if mcp_tool_calls:
@@ -616,10 +646,16 @@ class LangGraphQAPipeline:
                 for tc, result in zip(mcp_tool_calls, mcp_results):
                     results_map[tc["id"]] = result
                     self.logger.info(
-                        f"[TOOLS_NODE]   MCP [{tc['name']}] => {result[:100] if result else '(空)'}..."
+                        f"[TOOLS_NODE]   MCP [{tc['name']}] => result_len={len(result) if result else 0}"
                     )
 
-            ordered_results = [results_map[tc["id"]] for tc in tool_calls]
+            ordered_results = [
+                results_map.get(
+                    tc["id"],
+                    f"[Error calling tool {tc.get('name', 'unknown')}: no result]",
+                )
+                for tc in tool_calls
+            ]
 
             tool_messages = [
                 ToolMessage(content=result, tool_call_id=tc["id"])
@@ -645,6 +681,7 @@ class LangGraphQAPipeline:
                     f"remaining {len(history)}"
                 )
             state.tool_calls_history = history
+            state.agent_used_tools = bool(history)
             self.logger.info(
                 f"[TOOLS_NODE]   tool_calls_history 更新后长度: {len(history)}"
             )
@@ -753,6 +790,7 @@ class LangGraphQAPipeline:
                     ltm_persist_threshold=self._memory_settings.ltm_persist_threshold,
                     enable_stm=self._memory_settings.enable_stm,
                     enable_ltm=self._memory_settings.enable_ltm,
+                    memory_settings=self._memory_settings,
                 )
 
             await self._memory_service.initialize()
@@ -851,6 +889,7 @@ class LangGraphQAPipeline:
                 if self._memory_service and self._memory_service.is_initialized:
                     try:
                         user_id = self.config.retrieve.user_id or "default"
+                        turn_messages = state.messages[state.initial_message_count :]
                         stm_messages = [
                             {
                                 "role": "user"
@@ -858,9 +897,10 @@ class LangGraphQAPipeline:
                                 else "assistant",
                                 "content": m.content,
                             }
-                            for m in state.messages
+                            for m in turn_messages
                             if isinstance(m, (HumanMessage, AIMessage))
                             and getattr(m, "content", None)
+                            and not getattr(m, "tool_calls", None)
                         ]
 
                         await self._memory_service.add(
@@ -907,10 +947,14 @@ class LangGraphQAPipeline:
             return "error"
 
         if state.agent_iteration >= self.config.retrieve.max_agent_iterations:
-            self.logger.warning(
-                "[LOOP_CHECK] <<< MAX ITERATIONS REACHED, returning 'done'"
+            state.error = (
+                f"Agent 达到最大工具调用轮数 "
+                f"({self.config.retrieve.max_agent_iterations})，已停止以避免循环调用"
             )
-            return "done"
+            self.logger.warning(
+                "[LOOP_CHECK] <<< MAX ITERATIONS REACHED, returning 'error'"
+            )
+            return "error"
 
         last_ai = None
         for m in reversed(state.messages):
@@ -943,6 +987,19 @@ class LangGraphQAPipeline:
             return "error"
 
         if state.agent_iteration > 0:
+            if state.agent_used_tools or state.tool_calls_history:
+                if self.config.retrieve.use_memory:
+                    self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'skip_generate'")
+                    return "skip_generate"
+                self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'finish'")
+                return "finish"
+
+            if state.final_context:
+                self.logger.info(
+                    "[GEN_ANSWER_CHECK] <<< returning 'generate_answer' for context-backed final answer"
+                )
+                return "generate_answer"
+
             if self.config.retrieve.use_memory:
                 self.logger.info("[GEN_ANSWER_CHECK] <<< returning 'skip_generate'")
                 return "skip_generate"
@@ -991,12 +1048,12 @@ class LangGraphQAPipeline:
             self.update_langfuse_trace(**kwargs)
 
         existing_messages = kwargs.get("messages", [])
-
         initial_state_object = QAState(
             original_query=query,
             messages=existing_messages,
             use_knowledge_base=self.config.retrieve.use_kb,
             use_memory=self.config.retrieve.use_memory,
+            initial_message_count=len(existing_messages),
         )
 
         try:
@@ -1040,6 +1097,13 @@ class LangGraphQAPipeline:
         except Exception as e:
             self.logger.error(f"问答处理失败: {e}")
             return {"error": f"处理请求时出错: {str(e)}"}
+
+    async def cleanup(self) -> None:
+        """释放 pipeline 持有的长连接资源。"""
+        await self._close_mcp_client()
+        close = getattr(self.db_connection_manager, "close", None)
+        if callable(close):
+            close()
 
     def ask_sync(self, query: str, **kwargs) -> Dict[str, Any]:
         """同步问答接口（内部使用 asyncio.run）"""

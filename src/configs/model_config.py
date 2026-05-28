@@ -13,7 +13,7 @@ class LLMConfig(BaseModel):
     """LLM 相关配置"""
 
     base_url: str = Field("", description="LLM API Base URL，默认从.env 中加载")
-    api_key: str = Field("", description="LLM API Key，默认从.env 中加载")
+    api_key: str = Field("", repr=False, description="LLM API Key，默认从.env 中加载")
     provider: str = Field("openai", description="LLM 提供商: openai/minimax/litellm")
     model: str = Field("gpt-4o", description="使用的模型名称")
     temperature: float = Field(0.0, ge=0, le=1, description="生成结果随机性")
@@ -31,7 +31,11 @@ class EmbeddingConfig(BaseModel):
     """Embedding 相关配置"""
 
     base_url: str = Field("", description="Embedding API Base URL，默认从.env 中加载")
-    api_key: str = Field("", description="Embedding API Key，默认从.env 中加载")
+    api_key: str = Field(
+        "",
+        repr=False,
+        description="Embedding API Key，默认从.env 中加载",
+    )
     model: str = Field("text-embedding-v3", description="Embedding 模型名称")
     use_cache: bool = Field(True, description="是否使用缓存")
 

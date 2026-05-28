@@ -3,7 +3,7 @@
 
 import pytest
 import asyncio
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import AsyncMock, Mock, patch, MagicMock
 
 from src.configs.config import AppConfig
 from src.cores.pipeline_langgraph import LangGraphQAPipeline, QAState
@@ -73,10 +73,10 @@ class TestQAPipelineNodes:
 
     @pytest.mark.asyncio
     async def test_parse_query_node(self, config, mock_components):
-        """测试查询解析节点"""
+        """测试入口路由节点"""
         pipeline = create_pipeline_with_mocks(config)
         state = QAState(original_query="测试问题")
-        result = await pipeline._parse_query(state)
+        result = await pipeline._route_query(state)
 
         assert result.original_query == "测试问题"
         assert result.error is None
@@ -106,6 +106,22 @@ class TestQAPipelineNodes:
 
         assert result.final_context is not None
         assert "工具结果" in result.final_context or "文档 1" in result.final_context
+
+    @pytest.mark.asyncio
+    async def test_build_context_light_rag_searches_kb(self, config, mock_components):
+        """测试轻 RAG 路径会先构建 KB 上下文"""
+        config.retrieve.use_kb = True
+        config.retrieve.use_tool = False
+        pipeline = create_pipeline_with_mocks(config)
+        pipeline._memory_service = None
+        pipeline.kb_tools = Mock()
+        pipeline.kb_tools.kb_search = AsyncMock(return_value="【知识库】命中文档")
+
+        state = QAState(original_query="测试")
+        result = await pipeline._build_context(state)
+
+        pipeline.kb_tools.kb_search.assert_awaited_once()
+        assert "命中文档" in result.final_context
 
     @pytest.mark.asyncio
     async def test_update_memory_node_disabled(self, config, mock_components):
@@ -189,16 +205,31 @@ class TestQAPipelineConditionalEdges:
 
         state_max_iterations = QAState(original_query="测试", agent_iteration=5)
         result = pipeline._should_continue_agent_loop(state_max_iterations)
-        assert result == "done"
+        assert result == "error"
+        assert "最大工具调用轮数" in state_max_iterations.error
 
     def test_should_generate_answer_agent_completed(self, config):
         """测试生成答案判断 - agent 已完成"""
         pipeline = create_pipeline_with_mocks(config)
         config.retrieve.use_memory = False
 
-        state = QAState(original_query="测试", agent_iteration=1)
+        state = QAState(original_query="测试", agent_iteration=1, agent_used_tools=True)
         result = pipeline._should_generate_answer(state)
         assert result == "finish"
+
+    def test_should_generate_answer_after_agent_context_added(self, config):
+        """测试 Agent 未用工具但后续构建了上下文时二次生成"""
+        pipeline = create_pipeline_with_mocks(config)
+        config.retrieve.use_memory = False
+
+        state = QAState(
+            original_query="测试",
+            agent_iteration=1,
+            final_context="补充上下文",
+            agent_used_tools=False,
+        )
+        result = pipeline._should_generate_answer(state)
+        assert result == "generate_answer"
 
     def test_should_generate_answer_no_agent(self, config):
         """测试生成答案判断 - 无 agent 循环"""
@@ -207,6 +238,17 @@ class TestQAPipelineConditionalEdges:
         state = QAState(original_query="测试", agent_iteration=0)
         result = pipeline._should_generate_answer(state)
         assert result == "generate_answer"
+
+    def test_should_continue_agent_loop_max_iterations_sets_error(self, config):
+        """测试达到最大迭代次数时给出可解释错误"""
+        pipeline = create_pipeline_with_mocks(config)
+        config.retrieve.max_agent_iterations = 2
+
+        state = QAState(original_query="测试", agent_iteration=2)
+        result = pipeline._should_continue_agent_loop(state)
+
+        assert result == "error"
+        assert "最大工具调用轮数" in state.error
 
 
 class TestQAPipelineIntegration:
@@ -222,13 +264,17 @@ class TestQAPipelineIntegration:
             pipeline._memory_init_lock = asyncio.Lock()
             pipeline._memory_settings = Mock()
             pipeline._memory_settings.enable_ltm = False
-            pipeline._define_workflow = Mock()
             pipeline.graph = Mock()
-            pipeline.checkpointer = Mock()
+            pipeline.checkpointer = None
 
             pipeline._build_graph()
 
-            pipeline._define_workflow.assert_called_once()
+            assert pipeline.graph is not None
+            graph_text = pipeline.graph.get_graph().draw_mermaid()
+            assert "route_query" in graph_text
+            assert "agent_node" in graph_text
+            assert "build_context" in graph_text
+            assert "tools_node" in graph_text
 
     def test_export_graph(self, config):
         """测试图导出"""

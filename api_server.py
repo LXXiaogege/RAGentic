@@ -4,15 +4,16 @@ RAGentic API Server
 FastAPI backend exposing LangGraphQAPipeline via REST/SSE endpoints
 """
 
-import os
 import uuid
-import asyncio
 import json
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from src.configs.config import AppConfig
@@ -32,8 +33,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pipeline instance cache per session
-_pipeline_cache: dict[str, LangGraphQAPipeline] = {}
+# Pipeline instance cache per session/config tuple
+PIPELINE_CACHE_MAX_SIZE = 32
+PIPELINE_CACHE_TTL_SECONDS = 60 * 60
+
+
+@dataclass
+class PipelineCacheEntry:
+    pipeline: LangGraphQAPipeline
+    last_accessed: float
+
+
+PipelineCacheKey = tuple[str, bool, int, bool, bool, bool]
+_pipeline_cache: OrderedDict[PipelineCacheKey, PipelineCacheEntry] = OrderedDict()
 
 
 class AskRequest(BaseModel):
@@ -64,9 +76,21 @@ async def get_pipeline(
     enable_think: bool,
 ) -> LangGraphQAPipeline:
     """Get or create a pipeline instance for the session."""
-    if session_id in _pipeline_cache:
+    cache_key = (
+        session_id,
+        use_memory,
+        top_k,
+        use_sparse,
+        use_reranker,
+        enable_think,
+    )
+    await _evict_expired_pipelines()
+    if cache_key in _pipeline_cache:
+        entry = _pipeline_cache.pop(cache_key)
+        entry.last_accessed = time.monotonic()
+        _pipeline_cache[cache_key] = entry
         logger.info(f"复用会话 {session_id} 的管道实例")
-        return _pipeline_cache[session_id]
+        return entry.pipeline
 
     config = AppConfig()
     req_config = config.create_request_config(
@@ -80,9 +104,38 @@ async def get_pipeline(
     )
 
     pipeline = LangGraphQAPipeline(req_config)
-    _pipeline_cache[session_id] = pipeline
+    _pipeline_cache[cache_key] = PipelineCacheEntry(
+        pipeline=pipeline,
+        last_accessed=time.monotonic(),
+    )
+    await _evict_overflow_pipelines()
     logger.info(f"为会话 {session_id} 创建新的管道实例，缓存大小: {len(_pipeline_cache)}")
     return pipeline
+
+
+async def _cleanup_pipeline(pipeline: LangGraphQAPipeline) -> None:
+    try:
+        await pipeline.cleanup()
+    except Exception as e:
+        logger.warning(f"清理管道资源失败: {e}")
+
+
+async def _evict_expired_pipelines() -> None:
+    now = time.monotonic()
+    expired_keys = [
+        key
+        for key, entry in _pipeline_cache.items()
+        if now - entry.last_accessed > PIPELINE_CACHE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        entry = _pipeline_cache.pop(key)
+        await _cleanup_pipeline(entry.pipeline)
+
+
+async def _evict_overflow_pipelines() -> None:
+    while len(_pipeline_cache) > PIPELINE_CACHE_MAX_SIZE:
+        _, entry = _pipeline_cache.popitem(last=False)
+        await _cleanup_pipeline(entry.pipeline)
 
 
 @app.get("/health")
@@ -199,8 +252,11 @@ async def ask_stream(request: AskRequest):
 @app.delete("/session/{session_id}")
 async def clear_session(session_id: str):
     """Clear a session (remove pipeline from cache)."""
-    if session_id in _pipeline_cache:
-        del _pipeline_cache[session_id]
+    matching_keys = [key for key in _pipeline_cache if key[0] == session_id]
+    if matching_keys:
+        for key in matching_keys:
+            entry = _pipeline_cache.pop(key)
+            await _cleanup_pipeline(entry.pipeline)
         return {"status": "ok", "message": f"Session {session_id} cleared"}
     return {"status": "ok", "message": "Session not found"}
 

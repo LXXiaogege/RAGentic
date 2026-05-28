@@ -42,6 +42,9 @@ venv.bak/
 # Claude Code local config
 .claude/
 
+.codex/
+.agents/
+
 # OpenSpec
 openspec
 
