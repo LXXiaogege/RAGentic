@@ -61,8 +61,11 @@ cp .env.example .env
 所有配置支持环境变量覆盖，使用 `__` 分隔：
 
 ```ini
-# LLM 配置（推荐使用 litellm，支持 100+ 模型）
-LLM__PROVIDER = litellm
+# LLM 配置
+# provider=openai 使用 OpenAI 官方或 OpenAI-compatible 接口
+# provider=minimax 使用 MiniMax OpenAI-compatible 接口
+# provider=litellm 可接入更多模型厂商
+LLM__PROVIDER = minimax
 LLM__MODEL = minimax/minimaxi
 LLM__BASE_URL = https://api.minimax.chat/v1
 LLM__API_KEY = your_api_key

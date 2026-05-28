@@ -8,20 +8,14 @@
 LiteLLM 客户端封装 - 兼容现有 LLMWrapper 接口
 """
 
-from typing import Any, Dict, List, Union, Type
-import json
-import litellm
+from typing import Any, Dict, List, Union
+
 from litellm import acompletion, completion
 from langfuse.decorators import observe
-from langchain_core.messages import (
-    BaseMessage,
-    HumanMessage,
-    AIMessage,
-    SystemMessage,
-    FunctionMessage,
-    ToolMessage,
-)
+from langchain_core.messages import BaseMessage
+
 from src.configs.logger_config import setup_logger
+from src.models.message_adapter import MessageAdapter
 
 logger = setup_logger(__name__)
 
@@ -34,13 +28,6 @@ class LiteLLMClient:
         self.api_key = api_key
         self.base_url = base_url
         self.provider = provider
-
-        litellm.api_key = api_key
-        if base_url:
-            litellm.api_base = base_url
-
-        if provider == "minimax":
-            litellm.drop_params = True
 
     def _prepare_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """准备 litellm 调用参数"""
@@ -63,16 +50,21 @@ class LiteLLMClient:
         **kwargs,
     ):
         self.logger.info(f"[LiteLLM] chat request: model={model}, stream={stream}")
+        model = model or ""
 
         if self.provider == "minimax":
             # MiniMax 需要用 OpenAI 兼容模式，传递 custom_llm_provider
             if model.startswith("minimax/"):
                 model = model[len("minimax/"):]
             kwargs["custom_llm_provider"] = "openai"
+            kwargs["drop_params"] = True
         elif self.provider != "openai" and not model.startswith(self.provider + "/"):
             model = f"{self.provider}/{model}"
 
         kwargs = self._prepare_kwargs(kwargs)
+        kwargs["api_key"] = self.api_key
+        if self.base_url:
+            kwargs["api_base"] = self.base_url
 
         try:
             response = completion(
@@ -96,16 +88,21 @@ class LiteLLMClient:
         **kwargs,
     ):
         self.logger.info(f"[LiteLLM] achat request: model={model}, stream={stream}")
+        model = model or ""
 
         if self.provider == "minimax":
             # MiniMax 需要用 OpenAI 兼容模式，传递 custom_llm_provider
             if model.startswith("minimax/"):
                 model = model[len("minimax/"):]
             kwargs["custom_llm_provider"] = "openai"
+            kwargs["drop_params"] = True
         elif self.provider != "openai" and not model.startswith(self.provider + "/"):
             model = f"{self.provider}/{model}"
 
         kwargs = self._prepare_kwargs(kwargs)
+        kwargs["api_key"] = self.api_key
+        if self.base_url:
+            kwargs["api_base"] = self.base_url
 
         try:
             response = await acompletion(
@@ -124,43 +121,13 @@ class LiteLLMClient:
 class LiteLLMWrapper:
     """LiteLLM 版本的 LLMWrapper - 完全兼容原有接口"""
 
-    TYPE_TO_ROLE: Dict[Type[BaseMessage], str] = {
-        HumanMessage: "user",
-        AIMessage: "assistant",
-        SystemMessage: "system",
-        FunctionMessage: "function",
-        ToolMessage: "tool",
-    }
-
     def __init__(self, api_key: str, base_url: str, provider: str = "openai"):
         self.logger = setup_logger(f"{__name__}.LiteLLMWrapper")
         self.client = LiteLLMClient(api_key, base_url, provider)
         self.provider = provider
 
     def convert_messages_to_dicts(self, messages: List[BaseMessage]) -> List[Dict]:
-        formatted = []
-        for msg in messages:
-            role = self.TYPE_TO_ROLE.get(type(msg))
-            if role is None:
-                raise ValueError(f"Unknown message type: {type(msg)}")
-            d = {"role": role, "content": msg.content or ""}
-            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-                d["tool_calls"] = [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": json.dumps(tc["args"]),
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ]
-                d["content"] = msg.content or None
-            if isinstance(msg, ToolMessage):
-                d["tool_call_id"] = msg.tool_call_id
-            formatted.append(d)
-        return formatted
+        return MessageAdapter.to_openai_messages(messages)
 
     def chat(
         self,
