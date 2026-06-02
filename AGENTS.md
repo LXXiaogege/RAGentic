@@ -242,10 +242,16 @@ except Exception as e:
 
 ## 🚀 Common Tasks
 
-### Run Web App
+### Run API Server
 ```bash
-PYTHONPATH=. uv run python chainlit_app.py
-# Access at http://127.0.0.1:7860
+PYTHONPATH=. uv run python api_server.py
+# FastAPI backend at http://127.0.0.1:8000
+```
+
+### Run Frontend
+```bash
+cd frontend && npm run dev
+# Next.js UI at http://127.0.0.1:3000
 ```
 
 ### Run MCP Server

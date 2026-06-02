@@ -29,7 +29,7 @@ COPY --from=builder /app/.venv /app/.venv
 
 # Copy application code
 COPY src/ ./src/
-COPY web_app.py mcp_server.py ./
+COPY api_server.py mcp_server.py ./
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH"
@@ -37,11 +37,11 @@ ENV PYTHONPATH="/app"
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
-EXPOSE 7860
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:7860/api/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 # Run application
-CMD ["python", "web_app.py"]
+CMD ["python", "api_server.py"]
